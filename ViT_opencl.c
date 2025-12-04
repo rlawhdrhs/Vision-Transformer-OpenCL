@@ -376,9 +376,6 @@ void gemm_ScoresV(float *scores_host, float *V_host, float *attn_output_host, in
     clReleaseKernel(gemm_kernel);
 }
 
-// ----------------------------------------------------
-// MHA GEMM 커널 실행 헬퍼 함수
-// ----------------------------------------------------
 cl_int enqueue_gemm_stage(cl_command_queue queue, cl_kernel kernel,
     cl_mem A, cl_mem B, cl_mem C,
     int M, int N, int K,
@@ -422,10 +419,72 @@ cl_int enqueue_gemm_stage(cl_command_queue queue, cl_kernel kernel,
     return err;
 }
 
+//cl_int enqueue_gemm_stage(cl_command_queue queue, cl_kernel kernel,
+//    cl_mem input,)
+//{
+//    int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1;
+//    int in_features = embed_dim;
+//    int out_features = (int)(embed_dim * mlp_ratio);
+//    cl_int err;
+//
+//    cl_kernel g_kernel_fc1 = clCreateKernel(g_opencl.program, "fc1_kernel", &err);
+//
+//    // --------------------- OpenCL fc1 (GPU) ---------------------
+//
+//    size_t in_bytes = sizeof(float) * tokens * in_features;
+//    size_t w_bytes = sizeof(float) * out_features * in_features;
+//    size_t b_bytes = sizeof(float) * out_features;
+//    size_t out_bytes = sizeof(float) * tokens * out_features;
+//
+//
+//    cl_mem d_input = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+//        in_bytes, input, &err);
+//    cl_mem d_weight = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+//        w_bytes, fc1_weight.data, &err);
+//    cl_mem d_bias = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+//        b_bytes, fc1_bias.data, &err);
+//    cl_mem d_output = clCreateBuffer(g_opencl.context, CL_MEM_WRITE_ONLY,
+//        out_bytes, NULL, &err);
+//
+//    err = clSetKernelArg(g_kernel_fc1, 0, sizeof(cl_mem), &d_input);
+//    err |= clSetKernelArg(g_kernel_fc1, 1, sizeof(cl_mem), &d_weight);
+//    err |= clSetKernelArg(g_kernel_fc1, 2, sizeof(cl_mem), &d_bias);
+//    err |= clSetKernelArg(g_kernel_fc1, 3, sizeof(cl_mem), &d_output);
+//    err |= clSetKernelArg(g_kernel_fc1, 4, sizeof(int), &tokens);
+//    err |= clSetKernelArg(g_kernel_fc1, 5, sizeof(int), &in_features);
+//    err |= clSetKernelArg(g_kernel_fc1, 6, sizeof(int), &out_features);
+//
+//    size_t global[2] = { (size_t)tokens, (size_t)out_features };
+//    err = clEnqueueNDRangeKernel(g_opencl.queue, g_kernel_fc1,
+//        2, NULL, global, NULL,
+//        0, NULL, NULL);
+//    clFinish(g_opencl.queue);
+//
+//    float *fc1_out = (float *)malloc(out_bytes);
+//    err = clEnqueueReadBuffer(g_opencl.queue, d_output, CL_TRUE,
+//        0, out_bytes, fc1_out,
+//        0, NULL, NULL);
+//
+//    clReleaseMemObject(d_input);
+//    clReleaseMemObject(d_weight);
+//    clReleaseMemObject(d_bias);
+//    clReleaseMemObject(d_output);
+//
+//    // --------------------- 나머지 부분은 CPU ---------------------
+//
+//    for (int i = 0; i < tokens * out_features; i++) {
+//        fc1_out[i] = gelu(fc1_out[i]);
+//    }
+//
+//    linear_layer(fc1_out, output,
+//        tokens, out_features, embed_dim,
+//        fc2_weight, fc2_bias);
+//
+//    free(fc1_out);
+//    CHECK_ERROR(err);
+//    return err;
+//}
 
-// ----------------------------------------------------
-// Softmax 커널 실행 헬퍼 함수
-// ----------------------------------------------------
 cl_int enqueue_softmax_stage(cl_command_queue queue, cl_kernel kernel,
     cl_mem scores, int tokens, int score_offset,
     cl_uint num_events_in_wait_list, const cl_event *event_wait_list,
@@ -569,351 +628,72 @@ void multihead_attn_opencl(float *input, float *output,
     clReleaseMemObject(scores_d); clReleaseMemObject(attn_output_d);
 }
 
-void compare_buffers(const char *stage_name, const float *buf_cpu, const float *buf_opencl, size_t num_elements) {
-    float max_abs_error = 0.0f;
-    float max_cpu_val = 0.0f;
-    float max_ocl_val = 0.0f;
-    int max_error_idx = -1;
-    int mismatch_count = 0;
-    const float threshold = 1e-4f;
-
-    for (size_t i = 0; i < num_elements; i++) {
-        float diff = fabsf(buf_cpu[i] - buf_opencl[i]);
-
-        if (fabsf(buf_cpu[i]) > max_cpu_val) max_cpu_val = fabsf(buf_cpu[i]);
-        if (fabsf(buf_opencl[i]) > max_ocl_val) max_ocl_val = fabsf(buf_opencl[i]);
-
-        if (diff > max_abs_error) {
-            max_abs_error = diff;
-            max_error_idx = i;
-        }
-
-        if (diff > threshold) {
-            mismatch_count++;
-        }
-    }
-
-    printf("\n--- Stage Comparison: %s ---\n", stage_name);
-    printf("Total Elements: %zu, Mismatched: %d\n", num_elements, mismatch_count);
-    printf("Max Abs Error: %e (Threshold: %e)\n", max_abs_error, threshold);
-
-    if (max_abs_error > threshold) {
-        printf("ERROR LOCATED HERE! Max CPU Val: %f, Max OpenCL Val: %f\n", max_cpu_val, max_ocl_val);
-        printf("Index %d: CPU = %f, OpenCL = %f, Diff = %e\n",
-            max_error_idx, buf_cpu[max_error_idx], buf_opencl[max_error_idx], max_abs_error);
-    }
-    else {
-        printf("OK.Results match(FPE expected).\n");
-    }
-}
-
-void compare_mha_outputs(float *input, Network in_weight, Network in_bias, Network out_weight, Network out_bias) {
-
-    // 1. 메모리 할당
-    int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1;
-    size_t output_size = sizeof(float) * tokens * embed_dim;
-
-    float *output_cpu = (float *)malloc(output_size);
-    float *output_opencl = (float *)malloc(output_size);
-
-    // 최종 출력 결과를 비교하려면, MHA의 최종 선형 프로젝션까지 포함하는
-    // 전체 블록의 출력 버퍼(output)를 사용해야 합니다.
-
-    if (!output_cpu || !output_opencl) {
-        fprintf(stderr, "Error: Failed to allocate memory for comparison.\n");
-        exit(1);
-    }
-
-    printf("--- MHA 출력 비교 시작 (Tokens: %d, Embed Dim: %d) ---\n", tokens, embed_dim);
-
-    // 2. 순차 실행 (CPU)
-    printf("1. Running Sequential MHA...\n");
-    multihead_attn(input, output_cpu, in_weight, in_bias, out_weight, out_bias);
-
-    // 3. 병렬 실행 (OpenCL)
-    printf("2. Running Parallel MHA (OpenCL)...\n");
-    multihead_attn_opencl(input, output_opencl, in_weight, in_bias, out_weight, out_bias);
-
-    // 4. 결과 비교
-    float max_abs_error = 0.0f;
-    int max_error_idx = -1;
-    int mismatch_count = 0;
-    const float threshold = 1e-4f; // 허용 오차 (부동 소수점 비교용)
-
-    for (int i = 0; i < tokens * embed_dim; i++) {
-        float diff = fabsf(output_cpu[i] - output_opencl[i]);
-
-        if (diff > max_abs_error) {
-            max_abs_error = diff;
-            max_error_idx = i;
-        }
-
-        if (diff > threshold) {
-            mismatch_count++;
-        }
-    }
-
-    // 5. 결과 출력
-    printf("--- Comparison Results ---\n");
-    printf("Total elements: %zu\n", tokens * embed_dim);
-    printf("Max Absolute Error: %e\n", max_abs_error);
-
-    if (max_abs_error > threshold) {
-        printf("Discrepancy Found! (Mismatch Count: %d)\n", mismatch_count);
-        printf("Index with Max Error (%d): CPU = %f, OpenCL = %f\n",
-            max_error_idx, output_cpu[max_error_idx], output_opencl[max_error_idx]);
-
-        // 오차가 큰 경우, 디버깅을 위해 몇 가지 값 출력
-        if (mismatch_count > 0) {
-            printf("\n--- First 5 Mismatched Values ---\n");
-            int count = 0;
-            for (int i = 0; i < tokens * embed_dim && count < 5; i++) {
-                float diff = fabsf(output_cpu[i] - output_opencl[i]);
-                if (diff > threshold) {
-                    printf("Idx %d (Row %d, Dim %d): CPU: %.6f, OpenCL: %.6f, Diff: %.6e\n",
-                        i, i / embed_dim, i % embed_dim, output_cpu[i], output_opencl[i], diff);
-                    count++;
-                }
-            }
-        }
-
-    }
-    else {
-        printf("Results Match within threshold (%.6e).\n", threshold);
-    }
-
-    // 메모리 해제
-    free(output_cpu);
-    free(output_opencl);
-
-    printf("----------------------------------------\n");
-}
-
-void mha_debug_compare_stages(float *input, Network in_weight, Network in_bias, Network out_weight, Network out_bias)
+// MLP 블록(OpenCL+CPU) 시간 측정 포함 버전(류태우)
+void mlp_block_opencl(float *input, float *output,
+    Network fc1_weight, Network fc1_bias,
+    Network fc2_weight, Network fc2_bias)
 {
-    cl_int err;
-    int head_dim = embed_dim / num_heads;
     int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1;
-    const int TS = 4; // MHA_gemm_kernel의 TS와 일치해야 함
+    int in_features = embed_dim;
+    int out_features = (int)(embed_dim * mlp_ratio);
+    cl_int err;
 
-    // 1. QKV Calculation (CPU)
-    int Q_dim = 0, K_dim = embed_dim, V_dim = embed_dim * 2;
-    size_t qkv_size_bytes = sizeof(float) * tokens * embed_dim;
-    size_t qkv_size_elements = tokens * embed_dim;
+    cl_kernel g_kernel_fc1 = clCreateKernel(g_opencl.program, "fc1_kernel", &err);
 
-    // CPU QKV 버퍼
-    float *Q_cpu = (float *)malloc(qkv_size_bytes);
-    float *K_cpu = (float *)malloc(qkv_size_bytes);
-    float *V_cpu = (float *)malloc(qkv_size_bytes);
+    // --------------------- OpenCL fc1 (GPU) ---------------------
 
-    // Q, K, V 계산 (호스트 CPU에서 공통으로 수행)
-    for (int t = 0; t < tokens; t++) {
-        float sum_q, sum_k, sum_v;
-        for (int i = 0; i < embed_dim; i++) {
-            sum_q = in_bias.data[Q_dim + i], sum_k = in_bias.data[K_dim + i], sum_v = in_bias.data[V_dim + i];
-            for (int j = 0; j < embed_dim; j++) {
-                sum_q += input[t * embed_dim + j] * in_weight.data[(Q_dim + i) * embed_dim + j];
-                sum_k += input[t * embed_dim + j] * in_weight.data[(K_dim + i) * embed_dim + j];
-                sum_v += input[t * embed_dim + j] * in_weight.data[(V_dim + i) * embed_dim + j];
-            }
-            Q_cpu[t * embed_dim + i] = sum_q;
-            K_cpu[t * embed_dim + i] = sum_k;
-            V_cpu[t * embed_dim + i] = sum_v;
-        }
+    size_t in_bytes = sizeof(float) * tokens * in_features;
+    size_t w_bytes = sizeof(float) * out_features * in_features;
+    size_t b_bytes = sizeof(float) * out_features;
+    size_t out_bytes = sizeof(float) * tokens * out_features;
+
+
+    cl_mem d_input = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        in_bytes, input, &err);
+    cl_mem d_weight = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        w_bytes, fc1_weight.data, &err);
+    cl_mem d_bias = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        b_bytes, fc1_bias.data, &err);
+    cl_mem d_output = clCreateBuffer(g_opencl.context, CL_MEM_WRITE_ONLY,
+        out_bytes, NULL, &err);
+
+    err = clSetKernelArg(g_kernel_fc1, 0, sizeof(cl_mem), &d_input);
+    err |= clSetKernelArg(g_kernel_fc1, 1, sizeof(cl_mem), &d_weight);
+    err |= clSetKernelArg(g_kernel_fc1, 2, sizeof(cl_mem), &d_bias);
+    err |= clSetKernelArg(g_kernel_fc1, 3, sizeof(cl_mem), &d_output);
+    err |= clSetKernelArg(g_kernel_fc1, 4, sizeof(int), &tokens);
+    err |= clSetKernelArg(g_kernel_fc1, 5, sizeof(int), &in_features);
+    err |= clSetKernelArg(g_kernel_fc1, 6, sizeof(int), &out_features);
+
+    size_t global[2] = { (size_t)tokens, (size_t)out_features };
+    err = clEnqueueNDRangeKernel(g_opencl.queue, g_kernel_fc1,
+        2, NULL, global, NULL,
+        0, NULL, NULL);
+    clFinish(g_opencl.queue);
+
+    float *fc1_out = (float *)malloc(out_bytes);
+    err = clEnqueueReadBuffer(g_opencl.queue, d_output, CL_TRUE,
+        0, out_bytes, fc1_out,
+        0, NULL, NULL);
+
+    clReleaseMemObject(d_input);
+    clReleaseMemObject(d_weight);
+    clReleaseMemObject(d_bias);
+    clReleaseMemObject(d_output);
+
+    // --------------------- 나머지 부분은 CPU ---------------------
+
+    for (int i = 0; i < tokens * out_features; i++) {
+        fc1_out[i] = gelu(fc1_out[i]);
     }
 
-    // OpenCL 버퍼 크기
-    size_t scores_num_elements_per_head = tokens * tokens;
-    size_t scores_total_elements = scores_num_elements_per_head * num_heads;
-    size_t final_attn_output_size = sizeof(float) * qkv_size_elements;
+    linear_layer(fc1_out, output,
+        tokens, out_features, embed_dim,
+        fc2_weight, fc2_bias);
 
-    // OpenCL 버퍼 생성 (QKV는 복사)
-    cl_mem Q_d = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, qkv_size_bytes, Q_cpu, &err); CHECK_ERROR(err);
-    cl_mem K_d = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, qkv_size_bytes, K_cpu, &err); CHECK_ERROR(err);
-    cl_mem V_d = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, qkv_size_bytes, V_cpu, &err); CHECK_ERROR(err);
-
-    // Scores 버퍼 (num_heads * tokens * tokens)
-    cl_mem scores_d = clCreateBuffer(g_opencl.context, CL_MEM_READ_WRITE, scores_total_elements * sizeof(float), NULL, &err); CHECK_ERROR(err);
-    // Attn Output 버퍼
-    cl_mem attn_output_d = clCreateBuffer(g_opencl.context, CL_MEM_READ_WRITE, final_attn_output_size, NULL, &err); CHECK_ERROR(err);
-
-    float scale_factor = 1.0f / sqrtf((float)head_dim);
-
-    cl_kernel kernel_gemm = clCreateKernel(g_opencl.program, "MHA_gemm_kernel", &err); CHECK_ERROR(err);
-    cl_kernel kernel_softmax = clCreateKernel(g_opencl.program, "softmax_reduction_kernel", &err); CHECK_ERROR(err);
-
-
-    // ----------------------------------------------------
-    // Intermediate Buffers for Comparison
-    // ----------------------------------------------------
-    // Raw Scores (QK^T)
-    float *scores_cpu_raw = (float *)malloc(scores_total_elements * sizeof(float));
-    float *scores_opencl_raw = (float *)malloc(scores_total_elements * sizeof(float));
-
-    // Softmaxed Scores 
-    float *scores_cpu_softmaxed = (float *)malloc(scores_total_elements * sizeof(float));
-    float *scores_opencl_read = (float *)malloc(scores_total_elements * sizeof(float)); // OpenCL Softmax 결과 (순차 코드 Softmaxed Scores와 비교용)
-
-    // Final Attn Head Output
-    float *attn_output_cpu_ref = (float *)malloc(final_attn_output_size);
-    float *attn_output_opencl_read = (float *)malloc(final_attn_output_size);
-
-
-    // ----------------------------------------------------
-    // Loop for Head-wise Execution
-    // ----------------------------------------------------
-    cl_event raw_scores_gemm_events[num_heads]; // Raw Scores GEMM 완료 이벤트
-    cl_event final_completion_events[num_heads]; // 최종 출력 이벤트
-
-    for (int h = 0; h < num_heads; h++) {
-        int head_offset = h * head_dim;
-        int score_offset = h * scores_num_elements_per_head;
-        size_t score_offset_bytes = score_offset * sizeof(float);
-
-        cl_event score_gemm_event, write_softmax_event, final_gemm_event;
-
-        /* --- 1. CPU: Q * K^T (Raw Score Calculation) --- */
-        for (int i = 0; i < tokens; i++) {
-            size_t row_offset = score_offset + i * tokens;
-            for (int j = 0; j < tokens; j++) {
-                float score = 0.0f;
-                for (int d = 0; d < head_dim; d++) {
-                    float q = Q_cpu[i * embed_dim + head_offset + d];
-                    float k = K_cpu[j * embed_dim + head_offset + d];
-                    score += q * k;
-                }
-                scores_cpu_raw[row_offset + j] = score / sqrtf((float)head_dim);
-            }
-        }
-
-        /* --- 2. OpenCL: Q * K^T -> Scores_d (Raw Scores) --- */
-        enqueue_gemm_stage(g_opencl.queue, kernel_gemm, Q_d, K_d, scores_d,
-            tokens, head_dim, tokens, embed_dim, embed_dim, tokens,
-            head_offset, head_offset, score_offset, 1, scale_factor,
-            0, NULL, &score_gemm_event);
-
-        raw_scores_gemm_events[h] = score_gemm_event; // Raw Scores GEMM 완료 이벤트 저장
-
-
-        /* --- 3. Raw Scores Readback (OpenCL -> CPU) --- */
-        // Raw Scores GEMM 완료를 기다림 (Stage 2 비교를 위해)
-        clWaitForEvents(1, &score_gemm_event);
-        clEnqueueReadBuffer(g_opencl.queue, scores_d, CL_TRUE, score_offset_bytes,
-            scores_num_elements_per_head * sizeof(float), &scores_opencl_raw[score_offset],
-            0, NULL, NULL);
-
-
-        /* --- 4. CPU: Softmax Injection (OpenCL Raw Scores -> Softmaxed Scores) --- */
-        // OpenCL Raw Scores (scores_opencl_raw)에 순차 Softmax를 적용하여 scores_cpu_softmaxed에 저장
-        for (int i = 0; i < tokens; i++) {
-            size_t row_offset = score_offset + i * tokens;
-            float max_val;
-
-            // Max Reduction
-            max_val = scores_opencl_raw[row_offset]; // OpenCL Raw Scores 사용
-            for (int j = 1; j < tokens; j++) {
-                if (scores_opencl_raw[row_offset + j] > max_val) max_val = scores_opencl_raw[row_offset + j];
-            }
-
-            float sum_exp = 0.0f;
-            // Exp and Sum Reduction
-            for (int j = 0; j < tokens; j++) {
-                // CPU expf 사용
-                float exp_val = expf(scores_opencl_raw[row_offset + j] - max_val);
-                scores_cpu_softmaxed[row_offset + j] = exp_val; // Softmaxed 결과 저장
-                sum_exp += exp_val;
-            }
-
-            // Normalization
-            for (int j = 0; j < tokens; j++) {
-                scores_cpu_softmaxed[row_offset + j] /= sum_exp;
-            }
-        }
-
-        /* --- 5. Softmaxed Scores Writeback (CPU -> OpenCL) --- */
-        // CPU에서 계산된 Softmaxed Scores를 OpenCL scores_d 버퍼에 다시 씁니다.
-        clEnqueueWriteBuffer(g_opencl.queue, scores_d, CL_TRUE, score_offset_bytes,
-            scores_num_elements_per_head * sizeof(float), &scores_cpu_softmaxed[score_offset],
-            0, NULL, &write_softmax_event);
-
-
-        /* --- 6. CPU: Final Output Reference (Softmax Scores * V) --- */
-        for (int i = 0; i < tokens; i++) {
-            for (int d = 0; d < head_dim; d++) {
-                float sum = 0.0f;
-                for (int j = 0; j < tokens; j++) {
-                    // CPU의 Softmax 결과를 사용하여 최종 출력 레퍼런스 계산
-                    sum += scores_cpu_softmaxed[score_offset + i * tokens + j] * V_cpu[j * embed_dim + head_offset + d];
-                }
-                attn_output_cpu_ref[i * embed_dim + head_offset + d] = sum;
-            }
-        }
-
-        /* --- 7. OpenCL: Scores * V -> Attn_Output --- */
-        // OpenCL Scores_d 버퍼는 이제 CPU에서 계산된 Softmaxed Scores를 포함합니다.
-        enqueue_gemm_stage(g_opencl.queue, kernel_gemm, scores_d, V_d, attn_output_d,
-            tokens, tokens, head_dim, tokens, embed_dim, embed_dim,
-            score_offset, head_offset, head_offset, 0, 1.0f,
-            1, &write_softmax_event, &final_gemm_event);
-        clReleaseEvent(write_softmax_event);
-
-        final_completion_events[h] = final_gemm_event;
-    }
-
-
-    // ----------------------------------------------------
-    // Final Readback and Comparison
-    // ----------------------------------------------------
-
-    // Stage 4: Final Attn Output Readback
-    clWaitForEvents(num_heads, final_completion_events); // 모든 최종 GEMM 완료 대기
-    cl_event read_attn_event;
-    err = clEnqueueReadBuffer(g_opencl.queue, attn_output_d, CL_TRUE, 0,
-        final_attn_output_size, attn_output_opencl_read,
-        num_heads, final_completion_events, &read_attn_event); CHECK_ERROR(err);
-    clWaitForEvents(1, &read_attn_event);
-    clReleaseEvent(read_attn_event);
-
-
-    // ----------------------------------------------------
-    // Comparison
-    // ----------------------------------------------------
-    printf("\n\n=============== STAGE-WISE DEBUGGING RESULTS (V4 - HYBRID) ===============");
-
-    // Stage 1: QKV Check (Placebo check)
-    compare_buffers("1. QKV Input Check (Q Matrix)", Q_cpu, Q_cpu, qkv_size_elements);
-
-    // Stage 2: Raw Scores Check (Q*K^T GEMM Output Check)
-    compare_buffers("2. Raw Scores Check (Q*K^T GEMM)", scores_cpu_raw, scores_opencl_raw, scores_total_elements);
-
-    // Stage 3: Softmaxed Scores Check (CPU Softmax vs. CPU Ref Softmaxed Scores)
-    // CPU Softmaxed Scores (scores_cpu_softmaxed)는 OpenCL Raw Scores를 기반으로 계산되었으므로,
-    // Stage 2가 OK라면 Stage 3는 FPE 수준의 오차만 보여야 합니다.
-    compare_buffers("3. Softmaxed Scores (CPU Softmax Injection)", scores_cpu_softmaxed, scores_cpu_softmaxed, scores_total_elements); // Placebo check
-
-    // Stage 4: Final Attn Head Output Check
-    compare_buffers("4. Final Attn Head Output (Scores * V)", attn_output_cpu_ref, attn_output_opencl_read, qkv_size_elements);
-
-    // ----------------------------------------------------
-    // Cleanup
-    // ----------------------------------------------------
-    free(Q_cpu); free(K_cpu); free(V_cpu);
-    free(scores_cpu_raw);
-    free(scores_opencl_raw);
-    free(scores_cpu_softmaxed);
-    free(scores_opencl_read);
-    free(attn_output_cpu_ref);
-    free(attn_output_opencl_read);
-
-    // Event Cleanup
-    for (int h = 0; h < num_heads; h++) {
-        clReleaseEvent(final_completion_events[h]);
-    }
-    clReleaseKernel(kernel_gemm);
-    clReleaseKernel(kernel_softmax);
-    clReleaseMemObject(Q_d); clReleaseMemObject(K_d); clReleaseMemObject(V_d);
-    clReleaseMemObject(scores_d); clReleaseMemObject(attn_output_d);
+    free(fc1_out);
 }
+
 ////////////////////////////////////// Encoder Architecture //////////////////////////////////////
 void Encoder_opencl(float *input, float *output,
     Network ln1_w, Network ln1_b, Network attn_w, Network attn_b, Network attn_out_w, Network attn_out_b,
@@ -924,7 +704,6 @@ void Encoder_opencl(float *input, float *output,
     float *residual = (float *)malloc(sizeof(float) * tokens * embed_dim);
     float *ln2_out = (float *)malloc(sizeof(float) * tokens * embed_dim);
     float *mlp_out = (float *)malloc(sizeof(float) * tokens * embed_dim);
-
     /*LN1*/
     layer_norm_opencl(input, ln1_out, ln1_w, ln1_b);
 
@@ -940,7 +719,7 @@ void Encoder_opencl(float *input, float *output,
     layer_norm_opencl(residual, ln2_out, ln2_w, ln2_b);
 
     /*MLP*/
-    mlp_block(ln2_out, mlp_out, mlp1_w, mlp1_b, mlp2_w, mlp2_b);
+    mlp_block_opencl(ln2_out, mlp_out, mlp1_w, mlp1_b, mlp2_w, mlp2_b);
 
     /*Residual2*/
     for (int i = 0; i < tokens * embed_dim; i++) {
