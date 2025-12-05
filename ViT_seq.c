@@ -70,7 +70,6 @@ void flatten_transpose(float* input, float* output) {
 }
 
 void class_token(float* patch_tokens, float* final_tokens, Network cls_tk) {
-    // 이미지의 패치 수 계산: output_size = img_size / patch_size, num_patches = output_size^2
     int output_size = img_size / patch_size;
     int num_patches = output_size * output_size;
 

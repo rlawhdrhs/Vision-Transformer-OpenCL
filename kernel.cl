@@ -389,3 +389,97 @@ __kernel void fc1_kernel(
 
     output[t * out_features + o] = sum;
 }
+
+
+
+// ======================================================
+// =============== GELU kernel ===========================
+// ======================================================
+__kernel void gelu_kernel(
+    __global float* data,
+    int total)
+{
+    int idx = get_global_id(0);
+    if (idx >= total) return;
+
+    float x = data[idx];
+
+    // approximate GELU
+    float c = 0.7978845608f * (x + 0.044715f * x * x * x);
+    float gelu = 0.5f * x * (1.0f + tanh(c));
+
+    data[idx] = gelu;
+}
+
+
+// ======================================================
+// =============== fc2 kernel ============================
+// ======================================================
+__kernel void fc2_kernel(
+    __global const float* input,   // [tokens, hidden]
+    __global const float* weight,  // [out_features, hidden]
+    __global const float* bias,    // [out_features]
+    __global float* output,        // [tokens, out_features]
+    int tokens,
+    int hidden,
+    int out_features)
+{
+    int t = get_global_id(0);
+    int o = get_global_id(1);
+
+    if (t >= tokens || o >= out_features) return;
+
+    int in_offset = t * hidden;
+    int w_offset  = o * hidden;
+
+    float sum = bias[o];
+    for (int i = 0; i < hidden; i++) {
+        sum += input[in_offset + i] * weight[w_offset + i];
+    }
+    output[t * out_features + o] = sum;
+}
+
+__kernel void linear_forward_kernel(
+    const int tokens,       // M
+    const int in_features,  // K
+    const int out_features, // N
+    __global const float* input,
+    __global const float* weight, // [out, in]
+    __global const float* bias,   // [out]
+    __global float* output)       // [tokens, out]
+{
+    // Global ID
+    int row = get_global_id(0); // Token Index
+    int col = get_global_id(1); // Output Feature Index
+
+    if (row >= tokens || col >= out_features) return;
+
+    float sum = 0.0f;
+
+    int weight_offset = col * in_features;
+    int input_offset = row * in_features;
+
+    for (int i = 0; i < in_features; i++) {
+        sum += input[input_offset + i] * weight[weight_offset + i];
+    }
+
+    sum += bias[col];
+
+    output[row * out_features + col] = sum;
+}
+
+__kernel void add_bias_kernel(
+    __global float* data,       // GEMM 결과 (Q, K, V)
+    __global const float* bias, // 편향 데이터
+    int offset,                 // 편향 데이터 시작 위치 (Q=0, K=dim, V=2*dim)
+    int M,                      // Tokens
+    int N                       // Embed Dim
+) {
+    int col = get_global_id(0); // Embed Dim 방향
+    int row = get_global_id(1); // Token 방향
+
+    if (row < M && col < N) {
+        // data[row][col] += bias[offset + col]
+        data[row * N + col] += bias[offset + col];
+    }
+}

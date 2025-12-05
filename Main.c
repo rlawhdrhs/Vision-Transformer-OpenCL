@@ -45,12 +45,12 @@ int main() {
     n = 1;
     images->n = n;
     printf("=====================Start========================\n");
-    start = clock();
-    // Input here - 병렬처리 함수 작성
-    ViT_seq(images, network, probabilities);
-    //
-    end = clock();
-    printf("Seq time: %f sec\n", (double)(end - start) / CLK_TCK);
+    //start = clock();
+    //// Input here - 병렬처리 함수 작성
+    //ViT_seq(images, network, probabilities);
+    ////
+    //end = clock();
+    //printf("Seq time: %f sec\n", (double)(end - start) / CLK_TCK);
 
     start = clock();
     // Input here - 병렬처리 함수 작성
