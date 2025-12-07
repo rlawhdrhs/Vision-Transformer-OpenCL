@@ -87,11 +87,11 @@ __kernel void gemm(__global float *A,
 	const int K) // COL_B
 {
 	
-	// C[M x K]ÀÇ ÁÂÇ¥ (ci: ¿­ ÀÎµ¦½º, cj: Çà ÀÎµ¦½º)
+	// C[M x K]ì˜ ì¢Œí‘œ (ci: ì—´ ì¸ë±ìŠ¤, cj: í–‰ ì¸ë±ìŠ¤)
 	const int i = get_local_id(0);
 	const int j = get_local_id(1);
 
-	const int gi = get_group_id(0) * TS + i;    // TS´Â tile Å©±â, 2
+	const int gi = get_group_id(0) * TS + i;    // TSëŠ” tile í¬ê¸°, 2
 	const int gj = get_group_id(1) * TS + j;
 
 	__local float Asub[TS][TS];
@@ -99,9 +99,9 @@ __kernel void gemm(__global float *A,
 
 	float sum = 0.0f;
 	
-    // Å¸ÀÏ ¼øÈ¸
+    // íƒ€ì¼ ìˆœíšŒ
 	for (int t = 0; t <N; t += TS) {
-		const int ti = t + i;    // for loop ³»¿¡¼­ Å¸ÀÏ ³» ÁÂÇ¥¸¦ È®ÀÎ
+		const int ti = t + i;    // for loop ë‚´ì—ì„œ íƒ€ì¼ ë‚´ ì¢Œí‘œë¥¼ í™•ì¸
 		const int tj = t + j;
 
 		Asub[j][i] = A[N * gj + ti];
@@ -122,9 +122,9 @@ __kernel void Conv2d_Kernel(__global float* input,
                                        __global float* weight,
                                        __global float* bias,
                                        int img_size, int patch_size, int in_chans, int embed_dim,
-                                       int output_size) { // output_size´Â img_size / patch_size¿Í µ¿ÀÏ
+                                       int output_size) { // output_sizeëŠ” img_size / patch_sizeì™€ ë™ì¼
 
-    // Work-Item ID·Î Ãâ·Â ÁÂÇ¥ °è»ê
+    // Work-Item IDë¡œ ì¶œë ¥ ì¢Œí‘œ ê³„ì‚°
     int oc = get_global_id(0); // Output Channel (Embed Dim)
     int oh = get_global_id(1); // Output Height (Patch Row)
     int ow = get_global_id(2); // Output Width (Patch Col)
@@ -132,30 +132,30 @@ __kernel void Conv2d_Kernel(__global float* input,
     if (oc >= embed_dim || oh >= output_size || ow >= output_size)
         return;
 
-    // 1. Bias ÃÊ±âÈ­
+    // 1. Bias ì´ˆê¸°í™”
     float sum = bias[oc];
 
-    // »ó¼ö ¹Ì¸® °è»ê
+    // ìƒìˆ˜ ë¯¸ë¦¬ ê³„ì‚°
     const int input_channel_size = img_size * img_size; // H * W
     const int output_patch_size_sq = output_size * output_size; // H_out * W_out
     
-    // Weight ÀÎµ¦½Ì °ü·Ã »ó¼ö
+    // Weight ì¸ë±ì‹± ê´€ë ¨ ìƒìˆ˜
     const int weight_oc_offset = oc * in_chans * patch_size * patch_size;
     const int kernel_patch_size_sq = patch_size * patch_size; // K_H * K_W
 
-    // 2. Convolution ¿¬»ê (Work-Item ³»¿¡¼­ ¼øÂ÷ Ã³¸®)
+    // 2. Convolution ì—°ì‚° (Work-Item ë‚´ì—ì„œ ìˆœì°¨ ì²˜ë¦¬)
     for (int ic = 0; ic < in_chans; ++ic) {
         
-        // ÀÔ·Â ¹× °¡ÁßÄ¡ ¿ÀÇÁ¼Â °è»ê
+        // ì…ë ¥ ë° ê°€ì¤‘ì¹˜ ì˜¤í”„ì…‹ ê³„ì‚°
         const int input_ic_offset = ic * input_channel_size;
         const int weight_ic_offset = weight_oc_offset + (ic * kernel_patch_size_sq);
         
         for (int kh = 0; kh < patch_size; ++kh) {
             
             int ih = oh * patch_size + kh;
-            int input_ih_offset = input_ic_offset + (ih * img_size); // C + H ¿ÀÇÁ¼Â
+            int input_ih_offset = input_ic_offset + (ih * img_size); // C + H ì˜¤í”„ì…‹
 
-            // WeightÀÇ Kh ¿ÀÇÁ¼Â
+            // Weightì˜ Kh ì˜¤í”„ì…‹
             const int weight_kh_offset = weight_ic_offset + (kh * patch_size);
 
             for (int kw = 0; kw < patch_size; ++kw) {
@@ -169,7 +169,7 @@ __kernel void Conv2d_Kernel(__global float* input,
         }
     }
 
-    // 3. °á°ú ÀúÀå
+    // 3. ê²°ê³¼ ì €ì¥
     int output_idx = (oc * output_patch_size_sq) + (oh * output_size) + ow;
     output[output_idx] = sum;
 }
@@ -178,8 +178,8 @@ __kernel void FlattenTranspose_Kernel(__global float* input,
                                       __global float* output,
                                       int output_size, int embed_dim) {
 
-    // Global ID·Î Ãâ·Â ÀÎµ¦½º °è»ê: [patch_idx, oc]
-    // get_global_id(0)À» patch_idx·Î, get_global_id(1)À» oc·Î »ç¿ëÇÕ´Ï´Ù.
+    // Global IDë¡œ ì¶œë ¥ ì¸ë±ìŠ¤ ê³„ì‚°: [patch_idx, oc]
+    // get_global_id(0)ì„ patch_idxë¡œ, get_global_id(1)ì„ ocë¡œ ì‚¬ìš©í•©ë‹ˆë‹¤.
     int patch_idx = get_global_id(0); // 0 ~ num_patches - 1 (196)
     int oc = get_global_id(1);        // 0 ~ embed_dim - 1 (767)
 
@@ -188,18 +188,18 @@ __kernel void FlattenTranspose_Kernel(__global float* input,
     if (patch_idx >= num_patches || oc >= embed_dim)
         return;
 
-    // Ãâ·Â ÀÎµ¦½º (Patch, Embed)¿¡ ÇØ´çÇÏ´Â ÀÔ·Â ÀÎµ¦½º (C, H, W)¸¦ ¿ª»êÇÕ´Ï´Ù.
+    // ì¶œë ¥ ì¸ë±ìŠ¤ (Patch, Embed)ì— í•´ë‹¹í•˜ëŠ” ì…ë ¥ ì¸ë±ìŠ¤ (C, H, W)ë¥¼ ì—­ì‚°í•©ë‹ˆë‹¤.
     
-    // 1. patch_idx¸¦ (oh, ow)·Î ¿ªº¯È¯
+    // 1. patch_idxë¥¼ (oh, ow)ë¡œ ì—­ë³€í™˜
     int oh = patch_idx / output_size;
     int ow = patch_idx % output_size;
 
-    // 2. ÀÔ·Â (C, H, W) ÀÎµ¦½º °è»ê
-    // ±âÁ¸ ÀÔ·Â: (oc, oh, ow)
+    // 2. ì…ë ¥ (C, H, W) ì¸ë±ìŠ¤ ê³„ì‚°
+    // ê¸°ì¡´ ì…ë ¥: (oc, oh, ow)
     int idx_input = (oc * output_size + oh) * output_size + ow;
     
-    // 3. Ãâ·Â (Patch, Embed) ÀÎµ¦½º °è»ê
-    // ¿øÇÏ´Â Ãâ·Â: (patch_idx, oc)
+    // 3. ì¶œë ¥ (Patch, Embed) ì¸ë±ìŠ¤ ê³„ì‚°
+    // ì›í•˜ëŠ” ì¶œë ¥: (patch_idx, oc)
     int idx_output = patch_idx * embed_dim + oc;
 
     output[idx_output] = input[idx_input];
@@ -218,26 +218,26 @@ __kernel void MHA_gemm_kernel(
     const int j = get_local_id(1); 
     
     // Global Output Index
-    const int gi = get_group_id(0) * TS + i; // Col (K ¹æÇâ)
-    const int gj = get_group_id(1) * TS + j; // Row (M ¹æÇâ)
+    const int gi = get_group_id(0) * TS + i; // Col (K ë°©í–¥)
+    const int gj = get_group_id(1) * TS + j; // Row (M ë°©í–¥)
 
-    // ·ÎÄÃ ¸Ş¸ğ¸® (¹İµå½Ã ¸ÅÅ©·Î »ó¼ö TS »ç¿ë)
+    // ë¡œì»¬ ë©”ëª¨ë¦¬ (ë°˜ë“œì‹œ ë§¤í¬ë¡œ ìƒìˆ˜ TS ì‚¬ìš©)
     __local float Asub[TS][TS];
     __local float Bsub[TS][TS];
 
     float sum = 0.0f;
     
-    // Å¸ÀÏ ¼øÈ¸ (NÃà)
-    // ÁÖÀÇ: NÀÌ TSÀÇ ¹è¼ö°¡ ¾Æ´Ò ¼ö ÀÖÀ¸¹Ç·Î ¿Ã¸² Ã³¸®µÈ È½¼ö¸¸Å­ ¹İº¹
+    // íƒ€ì¼ ìˆœíšŒ (Nì¶•)
+    // ì£¼ì˜: Nì´ TSì˜ ë°°ìˆ˜ê°€ ì•„ë‹ ìˆ˜ ìˆìœ¼ë¯€ë¡œ ì˜¬ë¦¼ ì²˜ë¦¬ëœ íšŸìˆ˜ë§Œí¼ ë°˜ë³µ
     int num_tiles = (N + TS - 1) / TS;
 
     for (int t = 0; t < num_tiles; t++) {
         const int tiled_n_idx = t * TS;
-        const int ti = tiled_n_idx + i; // AÀÇ ¿­
-        const int tj = tiled_n_idx + j; // BÀÇ Çà
+        const int ti = tiled_n_idx + i; // Aì˜ ì—´
+        const int tj = tiled_n_idx + j; // Bì˜ í–‰
 
-        // A ·Îµù (Row: gj, Col: ti)
-        // ¹üÀ§ Ã¼Å©¸¦ ¿©±â¼­ ¼öÇàÇÏ¿© ÆĞµù ¿µ¿ªÀº 0À¸·Î Ã¤¿ò
+        // A ë¡œë”© (Row: gj, Col: ti)
+        // ë²”ìœ„ ì²´í¬ë¥¼ ì—¬ê¸°ì„œ ìˆ˜í–‰í•˜ì—¬ íŒ¨ë”© ì˜ì—­ì€ 0ìœ¼ë¡œ ì±„ì›€
         if (gj < M && ti < N) {
             int A_idx = A_offset + gj * A_row_stride + ti;
             Asub[j][i] = A[A_idx];
@@ -245,9 +245,9 @@ __kernel void MHA_gemm_kernel(
             Asub[j][i] = 0.0f;
         }
 
-        // B ·Îµù
+        // B ë¡œë”©
         if (transpose_B) { 
-            // B^T (Row: tj, Col: gi) -> ½ÇÁ¦ B ¸Ş¸ğ¸® (Row: gi, Col: tj)
+            // B^T (Row: tj, Col: gi) -> ì‹¤ì œ B ë©”ëª¨ë¦¬ (Row: gi, Col: tj)
             if (gi < K && tj < N) {
                 int B_idx = gi * B_row_stride + B_offset + tj;
                 Bsub[j][i] = B[B_idx];
@@ -266,8 +266,8 @@ __kernel void MHA_gemm_kernel(
 
         barrier(CLK_LOCAL_MEM_FENCE);
 
-        // ¿¬»ê (Local Memory ³»)
-        // TS Å©±â¸¸Å­ ¸ğµÎ ¼öÇà (0À¸·Î ÆĞµùµÇ¾úÀ¸¹Ç·Î ¾ÈÀü)
+        // ì—°ì‚° (Local Memory ë‚´)
+        // TS í¬ê¸°ë§Œí¼ ëª¨ë‘ ìˆ˜í–‰ (0ìœ¼ë¡œ íŒ¨ë”©ë˜ì—ˆìœ¼ë¯€ë¡œ ì•ˆì „)
         #pragma unroll
         for (int k = 0; k < TS; k++) {
             sum += Asub[j][k] * Bsub[k][i];    
@@ -276,14 +276,14 @@ __kernel void MHA_gemm_kernel(
         barrier(CLK_LOCAL_MEM_FENCE);
     }
     
-    // ÃÖÁ¾ °á°ú ÀúÀå
+    // ìµœì¢… ê²°ê³¼ ì €ì¥
     if (gj < M && gi < K) {
         float final_sum = sum * scale_factor;
         C[C_offset + gj * C_row_stride + gi] = final_sum;
     }
 }
 
-// Softmax: ÇÑ Çà(Row)À» ÇÏ³ªÀÇ WorkGroup(256 threads)ÀÌ Ã³¸®ÇÑ´Ù°í °¡Á¤
+// Softmax: í•œ í–‰(Row)ì„ í•˜ë‚˜ì˜ WorkGroup(256 threads)ì´ ì²˜ë¦¬í•œë‹¤ê³  ê°€ì •
 #define SOFTMAX_WG_SIZE 256
 
 __kernel void softmax_reduction_kernel(
@@ -291,20 +291,20 @@ __kernel void softmax_reduction_kernel(
     int tokens,
     int score_offset)
 {
-    // global_id(0)°¡ Çà(row) ÀÎµ¦½º
-    // get_local_id(0)°¡ ÄÃ·³ Ã³¸®¸¦ À§ÇÑ ½º·¹µå ID
-    // 2D Range·Î ½ÇÇàÇØ¾ß ÇÔ: Global[rows, 256], Local[1, 256] 
-    // ÇÏÁö¸¸ È£½ºÆ® ÄÚµå¸¦ 1D·Î Â¥¼ÌÀ¸´Ï, ¾Æ·¡¿Í °°ÀÌ 1D ÇüÅÂ¿¡ ¸ÂÃç ¼öÁ¤ÇÕ´Ï´Ù.
+    // global_id(0)ê°€ í–‰(row) ì¸ë±ìŠ¤
+    // get_local_id(0)ê°€ ì»¬ëŸ¼ ì²˜ë¦¬ë¥¼ ìœ„í•œ ìŠ¤ë ˆë“œ ID
+    // 2D Rangeë¡œ ì‹¤í–‰í•´ì•¼ í•¨: Global[rows, 256], Local[1, 256] 
+    // í•˜ì§€ë§Œ í˜¸ìŠ¤íŠ¸ ì½”ë“œë¥¼ 1Dë¡œ ì§œì…¨ìœ¼ë‹ˆ, ì•„ë˜ì™€ ê°™ì´ 1D í˜•íƒœì— ë§ì¶° ìˆ˜ì •í•©ë‹ˆë‹¤.
     
-    // ¼öÁ¤µÈ È£½ºÆ® ·ÎÁ÷ °¡Á¤: 
+    // ìˆ˜ì •ëœ í˜¸ìŠ¤íŠ¸ ë¡œì§ ê°€ì •: 
     // GlobalSize = tokens * 256
     // LocalSize = 256
-    // GroupID = Ã³¸®ÇÒ Çà(Row) ÀÎµ¦½º (Token Index)
+    // GroupID = ì²˜ë¦¬í•  í–‰(Row) ì¸ë±ìŠ¤ (Token Index)
     
     int row_idx = get_group_id(0);
     int lid = get_local_id(0);
     
-    if (row_idx >= tokens) return; // Çà ÀÚÃ¼°¡ ¹üÀ§¸¦ ¹ş¾î³ª¸é Á¾·á (¹è¸®¾î ¿µÇâ ¾øÀ½)
+    if (row_idx >= tokens) return; // í–‰ ìì²´ê°€ ë²”ìœ„ë¥¼ ë²—ì–´ë‚˜ë©´ ì¢…ë£Œ (ë°°ë¦¬ì–´ ì˜í–¥ ì—†ìŒ)
 
     int row_offset = score_offset + row_idx * tokens;
     
@@ -315,7 +315,7 @@ __kernel void softmax_reduction_kernel(
     // ----------------------------------------------------
     float max_val = -INFINITY;
 
-    // tokens°¡ 256º¸´Ù Å¬ °æ¿ì¸¦ ´ëºñÇØ loop Ã³¸®
+    // tokensê°€ 256ë³´ë‹¤ í´ ê²½ìš°ë¥¼ ëŒ€ë¹„í•´ loop ì²˜ë¦¬
     for (int i = lid; i < tokens; i += SOFTMAX_WG_SIZE) {
         float val = scores[row_offset + i];
         max_val = fmax(max_val, val);
@@ -331,7 +331,7 @@ __kernel void softmax_reduction_kernel(
         barrier(CLK_LOCAL_MEM_FENCE);
     }
     max_val = shared_data[0];
-    barrier(CLK_LOCAL_MEM_FENCE); // ¸ğµç ½º·¹µå°¡ max_valÀ» ¾Ë ¶§±îÁö ´ë±â
+    barrier(CLK_LOCAL_MEM_FENCE); // ëª¨ë“  ìŠ¤ë ˆë“œê°€ max_valì„ ì•Œ ë•Œê¹Œì§€ ëŒ€ê¸°
 
     // ----------------------------------------------------
     // 2. Exp & Sum Reduction
@@ -353,7 +353,7 @@ __kernel void softmax_reduction_kernel(
         barrier(CLK_LOCAL_MEM_FENCE);
     }
     sum_val = shared_data[0];
-    // barrier ºÒÇÊ¿ä (sum_valÀº ÀÌÁ¦ shared_data[0]¿¡¼­ ÀĞ±â¸¸ ÇÔ)
+    // barrier ë¶ˆí•„ìš” (sum_valì€ ì´ì œ shared_data[0]ì—ì„œ ì½ê¸°ë§Œ í•¨)
 
     // ----------------------------------------------------
     // 3. Normalization
@@ -364,36 +364,72 @@ __kernel void softmax_reduction_kernel(
     }
 }
 
-// fc1_kernel.cl
+
+
+#define TILE 16
+
+// ======================================================
+// ================== FC1 (Tiled, Safe) ==================
+// ======================================================
 __kernel void fc1_kernel(
-    __global const float* input,   // [tokens, in_features]
-    __global const float* weight,  // [out_features, in_features] (row-major)
-    __global const float* bias,    // [out_features]
-    __global float* output,        // [tokens, out_features]
+    __global const float* input,     // [tokens, in_features]
+    __global const float* weight,    // [out_features, in_features]
+    __global const float* bias,      // [out_features]
+    __global float* output,          // [tokens, out_features]
     int tokens,
     int in_features,
     int out_features)
 {
-    int t = get_global_id(0); // token index
-    int o = get_global_id(1); // output feature index
+    int t = get_global_id(0);   // token index
+    int o = get_global_id(1);   // output feature index
 
-    if (t >= tokens || o >= out_features) return;
+    int lx = get_local_id(0);   // local row
+    int ly = get_local_id(1);   // local col
 
-    int in_offset = t * in_features;
-    int w_offset  = o * in_features;
+    // ì´ ì›Œí¬ì•„ì´í…œì´ ì‹¤ì œ ìœ íš¨í•œ ì¶œë ¥ ìœ„ì¹˜ì¸ì§€
+    int valid = (t < tokens && o < out_features);
 
-    float sum = bias[o];
-    for (int i = 0; i < in_features; i++) {
-        sum += input[in_offset + i] * weight[w_offset + i];
+    __local float tileA[TILE][TILE];  // local tile for input
+    __local float tileB[TILE][TILE];  // local tile for weight
+
+    float sum = 0.0f;
+
+    // iterate along in_features (K dimension)
+    for (int k = 0; k < in_features; k += TILE)
+    {
+        // Load tile of input: A[t][k + ly]
+        float a = 0.0f;
+        int colA = k + ly;
+        if (valid && colA < in_features)
+            a = input[t * in_features + colA];
+        tileA[lx][ly] = a;
+
+        // Load tile of weight: weight[o][k + lx]
+        float b = 0.0f;
+        int rowB = k + lx;
+        if (o < out_features && rowB < in_features)
+            b = weight[o * in_features + rowB];
+        tileB[lx][ly] = b;
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // Compute partial dot-product for this tile
+        for (int i = 0; i < TILE; i++)
+            sum += tileA[lx][i] * tileB[i][ly];
+
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
 
-    output[t * out_features + o] = sum;
+    if (valid) {
+        sum += bias[o];
+        output[t * out_features + o] = sum;
+    }
 }
 
 
 
 // ======================================================
-// =============== GELU kernel ===========================
+// ================== GELU (Same) ========================
 // ======================================================
 __kernel void gelu_kernel(
     __global float* data,
@@ -403,8 +439,6 @@ __kernel void gelu_kernel(
     if (idx >= total) return;
 
     float x = data[idx];
-
-    // approximate GELU
     float c = 0.7978845608f * (x + 0.044715f * x * x * x);
     float gelu = 0.5f * x * (1.0f + tanh(c));
 
@@ -412,14 +446,15 @@ __kernel void gelu_kernel(
 }
 
 
+
 // ======================================================
-// =============== fc2 kernel ============================
+// ================== FC2 (Tiled, Safe) ==================
 // ======================================================
 __kernel void fc2_kernel(
-    __global const float* input,   // [tokens, hidden]
-    __global const float* weight,  // [out_features, hidden]
-    __global const float* bias,    // [out_features]
-    __global float* output,        // [tokens, out_features]
+    __global const float* input,     // [tokens, hidden]
+    __global const float* weight,    // [out_features, hidden]
+    __global const float* bias,      // [out_features]
+    __global float* output,          // [tokens, out_features]
     int tokens,
     int hidden,
     int out_features)
@@ -427,17 +462,46 @@ __kernel void fc2_kernel(
     int t = get_global_id(0);
     int o = get_global_id(1);
 
-    if (t >= tokens || o >= out_features) return;
+    int lx = get_local_id(0);
+    int ly = get_local_id(1);
 
-    int in_offset = t * hidden;
-    int w_offset  = o * hidden;
+    int valid = (t < tokens && o < out_features);
 
-    float sum = bias[o];
-    for (int i = 0; i < hidden; i++) {
-        sum += input[in_offset + i] * weight[w_offset + i];
+    __local float tileA[TILE][TILE];
+    __local float tileB[TILE][TILE];
+
+    float sum = 0.0f;
+
+    for (int k = 0; k < hidden; k += TILE)
+    {
+        // Load tile of input: A[t][k + ly]
+        float a = 0.0f;
+        int colA = k + ly;
+        if (valid && colA < hidden)
+            a = input[t * hidden + colA];
+        tileA[lx][ly] = a;
+
+        // Load tile of weight: weight[o][k + lx]
+        float b = 0.0f;
+        int rowB = k + lx;
+        if (o < out_features && rowB < hidden)
+            b = weight[o * hidden + rowB];
+        tileB[lx][ly] = b;
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int i = 0; i < TILE; i++)
+            sum += tileA[lx][i] * tileB[i][ly];
+
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
-    output[t * out_features + o] = sum;
+
+    if (valid) {
+        sum += bias[o];
+        output[t * out_features + o] = sum;
+    }
 }
+
 
 __kernel void linear_forward_kernel(
     const int tokens,       // M
@@ -469,14 +533,14 @@ __kernel void linear_forward_kernel(
 }
 
 __kernel void add_bias_kernel(
-    __global float* data,       // GEMM °á°ú (Q, K, V)
-    __global const float* bias, // ÆíÇâ µ¥ÀÌÅÍ
-    int offset,                 // ÆíÇâ µ¥ÀÌÅÍ ½ÃÀÛ À§Ä¡ (Q=0, K=dim, V=2*dim)
+    __global float* data,       // GEMM ê²°ê³¼ (Q, K, V)
+    __global const float* bias, // í¸í–¥ ë°ì´í„°
+    int offset,                 // í¸í–¥ ë°ì´í„° ì‹œì‘ ìœ„ì¹˜ (Q=0, K=dim, V=2*dim)
     int M,                      // Tokens
     int N                       // Embed Dim
 ) {
-    int col = get_global_id(0); // Embed Dim ¹æÇâ
-    int row = get_global_id(1); // Token ¹æÇâ
+    int col = get_global_id(0); // Embed Dim ë°©í–¥
+    int row = get_global_id(1); // Token ë°©í–¥
 
     if (row < M && col < N) {
         // data[row][col] += bias[offset + col]
