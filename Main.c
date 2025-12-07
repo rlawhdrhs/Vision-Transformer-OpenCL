@@ -16,7 +16,6 @@ const char* imagenet_label[1000] = {
 };
 
 int main() {
-    initialize_opencl();
     time_t start, end;
     ////////////////////////////////////// Input load //////////////////////////////////////
     const char* img_filename = "./Data/input-100.bin";
@@ -42,8 +41,6 @@ int main() {
         printf("Error: cannot open ./Data/opencl_result.txt for writing\n");
         return 1;
     }
-    n = 1;
-    images->n = n;
     printf("=====================Start========================\n");
     //start = clock();
     //// Input here - 병렬처리 함수 작성
@@ -82,7 +79,5 @@ int main() {
     else { 
         printf("Comparator: 파일 비교 도중 오류가 발생했습니다.\n");
     }
-
-    Release_opencl();
     return 0;
 }

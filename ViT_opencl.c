@@ -20,15 +20,15 @@
 #define MAX_PROFILE_KERNELS 32
 #define TS 16
 
-// í”„ë¡œíŒŒì¼ë§ ì‹¤í–‰ 1, ì•„ë‹ˆë©´ 0
+// ÇÁ·ÎÆÄÀÏ¸µ ½ÇÇà 1, ¾Æ´Ï¸é 0
 #define ENABLE_PROFILING 1
 
 // --------------------------------------------------------
-// ìë£Œêµ¬ì¡° ë° ì „ì—­ ë³€ìˆ˜
+// ÀÚ·á±¸Á¶ ¹× Àü¿ª º¯¼ö
 // --------------------------------------------------------
 typedef struct {
     cl_context context;
-    cl_command_queue queues[2]; // Double Bufferingì„ ìœ„í•œ 2ê°œì˜ í
+    cl_command_queue queues[2]; // Double BufferingÀ» À§ÇÑ 2°³ÀÇ Å¥
     cl_program program;
     cl_kernel k_conv, k_flat, k_prep, k_ln, k_gemm, k_res, k_soft, k_gelu, k_lin, k_bias, k_score, k_mha_soft, k_context, k_cls_soft;
     cl_device_id device;
@@ -42,35 +42,35 @@ typedef struct {
     // Encoder Ping-Pong Buffers
     cl_mem enc_in;           // [Batch, 197, 768]
     cl_mem enc_out;          // [Batch, 197, 768]
-    cl_mem ln_buf;           // LayerNorm ê²°ê³¼ ì €ì¥ìš©
-    cl_mem attn_res_buf;     // Attention ê²°ê³¼ ì €ì¥ìš©
-    cl_mem mlp_res_buf;      // MLP ê²°ê³¼ ì €ì¥ìš©
+    cl_mem ln_buf;           // LayerNorm °á°ú ÀúÀå¿ë
+    cl_mem attn_res_buf;     // Attention °á°ú ÀúÀå¿ë
+    cl_mem mlp_res_buf;      // MLP °á°ú ÀúÀå¿ë
 
     // MHA Internal
     cl_mem q_buf, k_buf, v_buf;
     cl_mem attn_score;       // [Batch, Heads, 197, 197]
-    cl_mem attn_out_linear;  // MHA ìµœì¢… Linear ì „ ê²°ê³¼
+    cl_mem attn_out_linear;  // MHA ÃÖÁ¾ Linear Àü °á°ú
 
     // MLP Internal
     cl_mem mlp_fc1_out;      // [Batch, 197, 3072]
 
-    // Output Buffers (Poolì— í¬í•¨ì‹œì¼œ ê´€ë¦¬)
+    // Output Buffers (Pool¿¡ Æ÷ÇÔ½ÃÄÑ °ü¸®)
     cl_mem logit_buf;        // [Batch, 197, 1000]
     cl_mem prob_buf;         // [Batch, 1000]
 } ViT_Memory_Pool;
 
 typedef struct {
-    char name[64];        // ì»¤ë„ ì´ë¦„
-    double total_time_ms; // ëˆ„ì  ì‹¤í–‰ ì‹œê°„
-    long call_count;      // í˜¸ì¶œ íšŸìˆ˜
+    char name[64];        // Ä¿³Î ÀÌ¸§
+    double total_time_ms; // ´©Àû ½ÇÇà ½Ã°£
+    long call_count;      // È£Ãâ È½¼ö
 } KernelProfile;
 
 KernelProfile g_profiler[MAX_PROFILE_KERNELS];
 int g_profile_count = 0;
 
 OpenCL_Resources g_opencl;
-ViT_Memory_Pool g_mem_pools[2]; // 2ê°œì˜ ë©”ëª¨ë¦¬ í’€
-cl_mem g_weight_buffers[152];   // ê°€ì¤‘ì¹˜ëŠ” Read-Onlyë¼ ê³µìœ  ê°€ëŠ¥
+ViT_Memory_Pool g_mem_pools[2]; // 2°³ÀÇ ¸Ş¸ğ¸® Ç®
+cl_mem g_weight_buffers[152];   // °¡ÁßÄ¡´Â Read-Only¶ó °øÀ¯ °¡´É
 
 // --------------------------------------------------------
 // Utility Functions
@@ -150,14 +150,14 @@ void initialize_opencl() {
     g_opencl.context = clCreateContext(NULL, 1, &g_opencl.device, NULL, NULL, &err);
     CHECK_ERROR(err);
 
-    // í”„ë¡œíŒŒì¼ë§ í™œì„±í™” ì—¬ë¶€ì— ë”°ë¥¸ Queue ì†ì„±
+    // ÇÁ·ÎÆÄÀÏ¸µ È°¼ºÈ­ ¿©ºÎ¿¡ µû¸¥ Queue ¼Ó¼º
     cl_command_queue_properties props_val = 0;
 #if ENABLE_PROFILING
     props_val = CL_QUEUE_PROFILING_ENABLE;
 #endif
     cl_queue_properties props[] = { CL_QUEUE_PROPERTIES, props_val, 0 };
 
-    // Queue 2ê°œ ìƒì„±
+    // Queue 2°³ »ı¼º
     g_opencl.queues[0] = clCreateCommandQueueWithProperties(g_opencl.context, g_opencl.device, props, &err);
     CHECK_ERROR(err);
     g_opencl.queues[1] = clCreateCommandQueueWithProperties(g_opencl.context, g_opencl.device, props, &err);
@@ -170,7 +170,7 @@ void initialize_opencl() {
     CHECK_ERROR(err);
     free(source);
 
-    // ì»¤ë„ ìƒì„±
+    // Ä¿³Î »ı¼º
     g_opencl.k_conv = clCreateKernel(g_opencl.program, "Conv2d_Batched_Kernel", &err); CHECK_ERROR(err);
     g_opencl.k_flat = clCreateKernel(g_opencl.program, "FlattenTranspose_Batched_Kernel", &err); CHECK_ERROR(err);
     g_opencl.k_prep = clCreateKernel(g_opencl.program, "prepare_class_pos_kernel", &err); CHECK_ERROR(err);
@@ -187,7 +187,7 @@ void initialize_opencl() {
     g_opencl.k_cls_soft = clCreateKernel(g_opencl.program, "extract_cls_softmax_kernel", &err); CHECK_ERROR(err);
 }
 
-// ì¸ë±ìŠ¤ë¥¼ ë°›ì•„ í•´ë‹¹ í’€ì„ ì´ˆê¸°í™”
+// ÀÎµ¦½º¸¦ ¹Ş¾Æ ÇØ´ç Ç®À» ÃÊ±âÈ­
 void init_memory_pool_idx(int pool_idx, int batch_size) {
     cl_int err;
     int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1; // 197
@@ -234,10 +234,10 @@ void load_all_weights(Network *networks) {
 }
 
 void release_resources() {
-    // 1. ê°€ì¤‘ì¹˜ í•´ì œ
+    // 1. °¡ÁßÄ¡ ÇØÁ¦
     for (int i = 0; i < 152; i++) clReleaseMemObject(g_weight_buffers[i]);
 
-    // 2. Memory Pools í•´ì œ (2ê°œ ëª¨ë‘)
+    // 2. Memory Pools ÇØÁ¦ (2°³ ¸ğµÎ)
     for (int i = 0; i < 2; i++) {
         clReleaseMemObject(g_mem_pools[i].batch_input);
         clReleaseMemObject(g_mem_pools[i].layer0_out);
@@ -257,7 +257,7 @@ void release_resources() {
         clReleaseMemObject(g_mem_pools[i].prob_buf);
     }
 
-    // 3. ì»¤ë„ ë° í”„ë¡œê·¸ë¨ í•´ì œ
+    // 3. Ä¿³Î ¹× ÇÁ·Î±×·¥ ÇØÁ¦
     clReleaseKernel(g_opencl.k_conv); clReleaseKernel(g_opencl.k_flat);
     clReleaseKernel(g_opencl.k_prep); clReleaseKernel(g_opencl.k_ln);
     clReleaseKernel(g_opencl.k_gemm); clReleaseKernel(g_opencl.k_res);
@@ -267,7 +267,7 @@ void release_resources() {
     clReleaseKernel(g_opencl.k_context); clReleaseKernel(g_opencl.k_cls_soft);
     clReleaseProgram(g_opencl.program);
 
-    // 4. Queue ë° Context í•´ì œ
+    // 4. Queue ¹× Context ÇØÁ¦
     clReleaseCommandQueue(g_opencl.queues[0]);
     clReleaseCommandQueue(g_opencl.queues[1]);
     clReleaseContext(g_opencl.context);
@@ -489,7 +489,7 @@ void MHA_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
     clEnqueueNDRangeKernel(queue, g_opencl.k_context, 3, NULL, ctx_global, ctx_local, 0, NULL, NULL);
 #endif
 
-    // 5. Output Proj -> ê¸°ì¡´ ìœ ì§€
+    // 5. Output Proj -> ±âÁ¸ À¯Áö
     run_linear(queue, pool->attn_out_linear, out, out_w_idx, out_b_idx, total_tokens, embed_dim, embed_dim, 0);
 }
 
@@ -530,7 +530,7 @@ void ViT_opencl(ImageData *image, Network *networks, float **probabilities) {
 
     initialize_opencl();
 
-    // 2ê°œì˜ Pool ì´ˆê¸°í™”
+    // 2°³ÀÇ Pool ÃÊ±âÈ­
     init_memory_pool_idx(0, batch_size);
     init_memory_pool_idx(1, batch_size);
 

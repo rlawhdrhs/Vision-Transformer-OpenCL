@@ -17,7 +17,4 @@
 
 void ViT_opencl(ImageData *image, Network *networks, float **prb);
 char *get_source_code(const char *file_name, size_t * len);
-void build_error(cl_program program, cl_device_id device, cl_int err);
-void initialize_opencl();
-void Release_opencl();
 #endif#pragma once

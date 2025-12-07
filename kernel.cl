@@ -180,14 +180,14 @@ __kernel void mha_score_kernel(
     int local_col = get_local_id(0);
 
     // Local Memory (Shared)
-    __local float Q_tile[TS][TS + 1]; // Bank Conflict ë°©ì§€ íŒ¨ë”©
+    __local float Q_tile[TS][TS + 1]; // Bank Conflict ¹æÁö ÆÐµù
     __local float K_tile[TS][TS + 1];
 
     int batch_idx = batch_head / num_heads;
     int head_idx  = batch_head % num_heads;
     
-    // Offset ê³„ì‚°
-    // Q, K êµ¬ì¡°: [Batch, Tokens, EmbedDim] (EmbedDim = NumHeads * HeadDim)
+    // Offset °è»ê
+    // Q, K ±¸Á¶: [Batch, Tokens, EmbedDim] (EmbedDim = NumHeads * HeadDim)
     int embed_dim = num_heads * head_dim;
     int base_offset = batch_idx * tokens * embed_dim + head_idx * head_dim;
 
@@ -217,7 +217,7 @@ __kernel void mha_score_kernel(
         barrier(CLK_LOCAL_MEM_FENCE);
 
         for (int k = 0; k < TS; k++) {
-            sum += Q_tile[local_row][k] * K_tile[local_col][k]; // KëŠ” ìœ„ì—ì„œ Transposeí•´ì„œ ë¡œë“œí•¨
+            sum += Q_tile[local_row][k] * K_tile[local_col][k]; // K´Â À§¿¡¼­ TransposeÇØ¼­ ·ÎµåÇÔ
         }
         barrier(CLK_LOCAL_MEM_FENCE);
     }
@@ -237,7 +237,7 @@ __kernel void mha_softmax_kernel(__global float* scores, int tokens) {
 
     int row_idx = bh * tokens * tokens + i * tokens;
 
-    // 1. Max ì°¾ê¸°
+    // 1. Max Ã£±â
     float max_val = -1e30f;
     for (int j = 0; j < tokens; j++) {
         max_val = fmax(max_val, scores[row_idx + j]);
@@ -282,7 +282,7 @@ __kernel void mha_context_kernel(
     // Offsets
     int score_base = batch_head * tokens * tokens;
     int v_base = batch_idx * tokens * embed_dim + head_idx * head_dim;
-    int out_base = batch_idx * tokens * embed_dim + head_idx * head_dim; // Vì™€ ë™ì¼ êµ¬ì¡°
+    int out_base = batch_idx * tokens * embed_dim + head_idx * head_dim; // V¿Í µ¿ÀÏ ±¸Á¶
 
     float sum = 0.0f;
     int num_tiles = (tokens + TS - 1) / TS;
@@ -381,7 +381,7 @@ __kernel void linear_kernel(
     
     // Global Index
     const int globalRow = TS * get_group_id(1) + row; 
-    const int globalCol = TS * get_group_id(0) + (col * 4); // float4 ê¸°ì¤€ì´ë¯€ë¡œ *4
+    const int globalCol = TS * get_group_id(0) + (col * 4); // float4 ±âÁØÀÌ¹Ç·Î *4
 
     // Local Memory (Padding +1 to avoid bank conflicts)
     __local float Asub[TS][TS + 1];
