@@ -424,6 +424,195 @@ __kernel void linear_tiled_float4(
     }
 }
 
+// Fused QKV Kernel (Original - uses more local memory but faster)
+__kernel void linear_qkv_fused_float4(
+    int M, int N, int K_dim,
+    __global const float* A,
+    __global const float* W,
+    __global const float* bias,
+    __global float* q_out,
+    __global float* k_out,
+    __global float* v_out)
+{
+    const int row = get_local_id(1);
+    const int col = get_local_id(0);
+    const int globalRow = TS * get_group_id(1) + row;
+    const int globalCol = TS * get_group_id(0) + (col * 4);
+
+    __local float Asub[TS][TS + 1];
+    __local float Qsub[TS][TS + 1];
+    __local float Ksub[TS][TS + 1];
+    __local float Vsub[TS][TS + 1];
+
+    float4 acc_q = (float4)(0.0f);
+    float4 acc_k = (float4)(0.0f);
+    float4 acc_v = (float4)(0.0f);
+
+    const int numTiles = (K_dim + TS - 1) / TS;
+
+    for (int t = 0; t < numTiles; t++) {
+        const int tiledCol = t * TS + col * 4;
+
+        for (int i = 0; i < 4; i++) {
+            int c = tiledCol + i;
+            if (globalRow < M && c < K_dim)
+                Asub[row][col * 4 + i] = A[globalRow * K_dim + c];
+            else
+                Asub[row][col * 4 + i] = 0.0f;
+        }
+
+        for (int i = 0; i < 4; i++) {
+            int w_col = t * TS + row;
+            int w_row_q = globalCol + i;
+            int w_row_k = globalCol + i + N;
+            int w_row_v = globalCol + i + 2 * N;
+
+            if (w_row_q < N && w_col < K_dim)
+                Qsub[col * 4 + i][row] = W[w_row_q * K_dim + w_col];
+            else
+                Qsub[col * 4 + i][row] = 0.0f;
+
+            if (w_row_k < (2 * N) && w_col < K_dim)
+                Ksub[col * 4 + i][row] = W[w_row_k * K_dim + w_col];
+            else
+                Ksub[col * 4 + i][row] = 0.0f;
+
+            if (w_row_v < (3 * N) && w_col < K_dim)
+                Vsub[col * 4 + i][row] = W[w_row_v * K_dim + w_col];
+            else
+                Vsub[col * 4 + i][row] = 0.0f;
+        }
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int k = 0; k < TS; k++) {
+            float valA = Asub[row][k];
+            float4 valQ = (float4)(Qsub[col*4+0][k], Qsub[col*4+1][k], Qsub[col*4+2][k], Qsub[col*4+3][k]);
+            float4 valK = (float4)(Ksub[col*4+0][k], Ksub[col*4+1][k], Ksub[col*4+2][k], Ksub[col*4+3][k]);
+            float4 valV = (float4)(Vsub[col*4+0][k], Vsub[col*4+1][k], Vsub[col*4+2][k], Vsub[col*4+3][k]);
+            acc_q += valA * valQ;
+            acc_k += valA * valK;
+            acc_v += valA * valV;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (globalRow < M && globalCol < N) {
+        float4 b_q = (float4)(bias[globalCol+0], bias[globalCol+1], bias[globalCol+2], bias[globalCol+3]);
+        float4 b_k = (float4)(bias[globalCol+0+N], bias[globalCol+1+N], bias[globalCol+2+N], bias[globalCol+3+N]);
+        float4 b_v = (float4)(bias[globalCol+0+2*N], bias[globalCol+1+2*N], bias[globalCol+2+2*N], bias[globalCol+3+2*N]);
+
+        *(__global float4*)&q_out[globalRow * N + globalCol] = acc_q + b_q;
+        *(__global float4*)&k_out[globalRow * N + globalCol] = acc_k + b_k;
+        *(__global float4*)&v_out[globalRow * N + globalCol] = acc_v + b_v;
+    }
+}
+
+/*
+// Unified QKV Kernel - Optimized for low local memory usage (SLOWER - disabled)
+#define QKV_TS 16
+
+__kernel void linear_qkv_unified(
+    int M,              // Tokens (197)
+    int N,              // Embed Dim (768)
+    int K_dim,          // Embed Dim (768)
+    __global const float* A,        // Input [M, K]
+    __global const float* W,        // Weight [3*N, K]
+    __global const float* bias,     // Bias [3*N]
+    __global float* q_out,
+    __global float* k_out,
+    __global float* v_out)
+{
+    const int row = get_local_id(1);  // 0..15
+    const int col = get_local_id(0);  // 0..15
+
+    const int globalRow = QKV_TS * get_group_id(1) + row;
+    const int globalCol = (QKV_TS * get_group_id(0) + col) * 4;  // Output column (0..2303)
+
+    __local float Asub[QKV_TS][QKV_TS];
+    __local float Wsub[QKV_TS][QKV_TS];
+
+    float4 acc = (float4)(0.0f);
+
+    const int numTiles = (K_dim + QKV_TS - 1) / QKV_TS;  // 768/16 = 48
+
+    for (int t = 0; t < numTiles; t++) {
+        // Load input tile A
+        int tiledCol_A = t * QKV_TS + col;
+        if (globalRow < M && tiledCol_A < K_dim)
+            Asub[row][col] = A[globalRow * K_dim + tiledCol_A];
+        else
+            Asub[row][col] = 0.0f;
+
+        // Load weight tile W (for all 4 output elements)
+        int tiledRow_W = t * QKV_TS + row;
+        int N_total = 3 * N;
+
+        // W is stored as [3*N, K] in row-major
+        // We need to load transposed for computation
+        if (globalCol < N_total && tiledRow_W < K_dim)
+            Wsub[col][row] = W[globalCol * K_dim + tiledRow_W];
+        else
+            Wsub[col][row] = 0.0f;
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // Compute
+        for (int k = 0; k < QKV_TS; k++) {
+            float valA = Asub[row][k];
+            float valW = Wsub[col][k];
+            acc.x += valA * valW;
+        }
+
+        // Load next 3 columns for float4
+        if ((globalCol + 1) < N_total && tiledRow_W < K_dim)
+            Wsub[col][row] = W[(globalCol + 1) * K_dim + tiledRow_W];
+        else
+            Wsub[col][row] = 0.0f;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (int k = 0; k < QKV_TS; k++)
+            acc.y += Asub[row][k] * Wsub[col][k];
+
+        if ((globalCol + 2) < N_total && tiledRow_W < K_dim)
+            Wsub[col][row] = W[(globalCol + 2) * K_dim + tiledRow_W];
+        else
+            Wsub[col][row] = 0.0f;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (int k = 0; k < QKV_TS; k++)
+            acc.z += Asub[row][k] * Wsub[col][k];
+
+        if ((globalCol + 3) < N_total && tiledRow_W < K_dim)
+            Wsub[col][row] = W[(globalCol + 3) * K_dim + tiledRow_W];
+        else
+            Wsub[col][row] = 0.0f;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (int k = 0; k < QKV_TS; k++)
+            acc.w += Asub[row][k] * Wsub[col][k];
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    // Add bias and write to appropriate output buffer
+    if (globalRow < M && globalCol < (3 * N)) {
+        float4 b_val = (float4)(bias[globalCol+0], bias[globalCol+1], bias[globalCol+2], bias[globalCol+3]);
+        float4 result = acc + b_val;
+
+        if (globalCol < N) {
+            // Q region
+            *(__global float4*)&q_out[globalRow * N + globalCol] = result;
+        } else if (globalCol < 2 * N) {
+            // K region
+            int offset = globalCol - N;
+            *(__global float4*)&k_out[globalRow * N + offset] = result;
+        } else {
+            // V region
+            int offset = globalCol - 2 * N;
+            *(__global float4*)&v_out[globalRow * N + offset] = result;
+        }
+    }
+}
+*/
+
 #define TS 32
 #define WPT 4
 #define RTS (TS / WPT) // 8

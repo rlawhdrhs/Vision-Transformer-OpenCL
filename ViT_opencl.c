@@ -26,7 +26,7 @@ typedef struct {
     cl_context context;
     cl_command_queue queue;
     cl_program program;
-    cl_kernel k_conv, k_flat, k_prep, k_ln, k_gemm, k_res, k_soft, k_gelu, k_lin, k_bias, k_score, k_mha_soft, k_context, k_lin_reg, k_cls_soft;
+    cl_kernel k_conv, k_flat, k_prep, k_ln, k_gemm, k_res, k_soft, k_gelu, k_lin, k_bias, k_score, k_mha_soft, k_context, k_lin_reg, k_cls_soft, k_qkv_fused;
     cl_device_id device;
 } OpenCL_Resources;
 
@@ -115,7 +115,9 @@ void initialize_opencl() {
     CHECK_ERROR(err);
     g_opencl.k_lin = clCreateKernel(g_opencl.program, "linear_tiled_float4", &err);
     CHECK_ERROR(err);
-    g_opencl.k_bias = clCreateKernel(g_opencl.program, "add_bias_broadcast_kernel", &err); 
+    g_opencl.k_bias = clCreateKernel(g_opencl.program, "add_bias_broadcast_kernel", &err);
+    CHECK_ERROR(err);
+    g_opencl.k_qkv_fused = clCreateKernel(g_opencl.program, "linear_qkv_fused_float4", &err);
     CHECK_ERROR(err);
 
     //Tiling O 2d
@@ -245,6 +247,9 @@ void release_resources() {
     clReleaseKernel(g_opencl.k_gemm); clReleaseKernel(g_opencl.k_res);
     clReleaseKernel(g_opencl.k_soft); clReleaseKernel(g_opencl.k_gelu);
     clReleaseKernel(g_opencl.k_lin); clReleaseKernel(g_opencl.k_bias);
+    clReleaseKernel(g_opencl.k_score); clReleaseKernel(g_opencl.k_mha_soft);
+    clReleaseKernel(g_opencl.k_context); clReleaseKernel(g_opencl.k_lin_reg);
+    clReleaseKernel(g_opencl.k_cls_soft); clReleaseKernel(g_opencl.k_qkv_fused);
     clReleaseProgram(g_opencl.program);
     clReleaseCommandQueue(g_opencl.queue);
     clReleaseContext(g_opencl.context);
@@ -426,6 +431,36 @@ void run_linear(cl_mem in, cl_mem out, int w_idx, int b_idx, int tokens, int in_
 #endif
 }
 
+void run_qkv_fused(cl_mem in, cl_mem q_out, cl_mem k_out, cl_mem v_out,
+                   int w_idx, int b_idx, int tokens, int N) {
+    int TS = 32;
+    int WPT = 4;
+    size_t global_col = ((N + TS - 1) / TS) * (TS / WPT);
+    size_t global_row = ((tokens + TS - 1) / TS) * TS;
+
+    size_t global[2] = { global_col, global_row };
+    size_t local[2] = { 8, 32 };
+
+    clSetKernelArg(g_opencl.k_qkv_fused, 0, sizeof(int), &tokens);
+    clSetKernelArg(g_opencl.k_qkv_fused, 1, sizeof(int), &N);
+    clSetKernelArg(g_opencl.k_qkv_fused, 2, sizeof(int), &N);
+    clSetKernelArg(g_opencl.k_qkv_fused, 3, sizeof(cl_mem), &in);
+    clSetKernelArg(g_opencl.k_qkv_fused, 4, sizeof(cl_mem), &g_weight_buffers[w_idx]);
+    clSetKernelArg(g_opencl.k_qkv_fused, 5, sizeof(cl_mem), &g_weight_buffers[b_idx]);
+    clSetKernelArg(g_opencl.k_qkv_fused, 6, sizeof(cl_mem), &q_out);
+    clSetKernelArg(g_opencl.k_qkv_fused, 7, sizeof(cl_mem), &k_out);
+    clSetKernelArg(g_opencl.k_qkv_fused, 8, sizeof(cl_mem), &v_out);
+
+#ifdef ENABLE_PROFILING
+    cl_event event;
+    cl_int err = clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_qkv_fused, 2, NULL, global, local, 0, NULL, &event);
+    register_kernel_time("QKV_Fused", event);
+    clReleaseEvent(event);
+#else
+    clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_qkv_fused, 2, NULL, global, local, 0, NULL, NULL);
+#endif
+}
+
 void run_add_bias(cl_mem data, cl_mem bias_buf, int rows, int cols, int bias_offset) {
     size_t global[2] = { (size_t)rows, (size_t)cols };
     clSetKernelArg(g_opencl.k_bias, 0, sizeof(cl_mem), &data);
@@ -527,12 +562,13 @@ void MHA_batched(cl_mem in, cl_mem out, int w_idx, int b_idx, int out_w_idx, int
     int head_dim = embed_dim / num_heads;
     float scale = 1.0f / sqrtf((float)head_dim);
 
-    // --- Q ---
-    run_linear(in, g_mem_pool.q_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 0);
-    // --- K ---
-    run_linear(in, g_mem_pool.k_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, embed_dim);
-    // --- V ---
-    run_linear(in, g_mem_pool.v_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 2 * embed_dim);
+    // --- Q, K, V (Old: 3 separate calls) ---
+    // run_linear(in, g_mem_pool.q_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 0);
+    // run_linear(in, g_mem_pool.k_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, embed_dim);
+    // run_linear(in, g_mem_pool.v_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 2 * embed_dim);
+
+    // --- Q, K, V (Fused: 1 call) ---
+    run_qkv_fused(in, g_mem_pool.q_buf, g_mem_pool.k_buf, g_mem_pool.v_buf, w_idx, b_idx, total_tokens, embed_dim);
     // -----------------------------------------------------
     // Step 2: Calculate Scores (Q * K^T)
     // -----------------------------------------------------
