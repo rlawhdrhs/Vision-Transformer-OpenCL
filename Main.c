@@ -45,14 +45,14 @@ int main() {
     images->n = n;*/
     printf("=====================Start========================\n");
     //start = clock();
-    //// Input here - º´·ÄÃ³¸® ÇÔ¼ö ÀÛ¼º
+    //// Input here - ï¿½ï¿½ï¿½ï¿½Ã³ï¿½ï¿½ ï¿½Ô¼ï¿½ ï¿½Û¼ï¿½
     //ViT_seq(images, network, probabilities);
     ////
     //end = clock();
     //printf("Seq time: %f sec\n", (double)(end - start) / CLK_TCK);
 
     start = clock();
-    // Input here - º´·ÄÃ³¸® ÇÔ¼ö ÀÛ¼º
+    // Input here - ï¿½ï¿½ï¿½ï¿½Ã³ï¿½ï¿½ ï¿½Ô¼ï¿½ ï¿½Û¼ï¿½
     ViT_opencl(images, network, probabilities);
     end = clock();
     printf("Opencl time: %f sec\n", (double)(end - start) / CLK_TCK);
@@ -72,13 +72,13 @@ int main() {
 
     int cmp = comparator();
     if (cmp == 0) {
-        printf("Comparator: µÎ ÆÄÀÏÀÇ ³»¿ëÀÌ µ¿ÀÏÇÕ´Ï´Ù.\n");
+        printf("Comparator: same.\n");
     }
     else if (cmp > 0) {
-        printf("Comparator: µÎ ÆÄÀÏÀÇ ³»¿ë¿¡ %d°³ÀÇ Â÷ÀÌ°¡ ÀÖ½À´Ï´Ù.\n", cmp);
+        printf("Comparator: %d diff.\n", cmp);
     }
     else {
-        printf("Comparator: ÆÄÀÏ ºñ±³ µµÁß ¿À·ù°¡ ¹ß»ıÇß½À´Ï´Ù.\n");
+        printf("Comparator: error.\n");
     }
     return 0;
 }

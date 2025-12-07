@@ -175,13 +175,13 @@ __kernel void mha_score_kernel(
 
     if (i >= tokens) return;
 
-    // ÇöÀç ¹èÄ¡¿Í Çìµå °è»ê
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½Ä¡ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½
     int batch_idx = bh / num_heads;
     int head_idx  = bh % num_heads;
 
-    // ¸Þ¸ð¸® ¿ÀÇÁ¼Â °è»ê
-    // Q, K ±¸Á¶: [Batch, Tokens, EmbedDim] (EmbedDim ¾È¿¡ Heads°¡ ÀÎÅÍ¸®ºù µÇ¾î ÀÖÀ½)
-    // ¼øÂ÷ ÄÚµå: Q[t * embed_dim + h * head_dim + d]
+    // ï¿½Þ¸ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½
+    // Q, K ï¿½ï¿½ï¿½ï¿½: [Batch, Tokens, EmbedDim] (EmbedDim ï¿½È¿ï¿½ Headsï¿½ï¿½ ï¿½ï¿½ï¿½Í¸ï¿½ï¿½ï¿½ ï¿½Ç¾ï¿½ ï¿½ï¿½ï¿½ï¿½)
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½Úµï¿½: Q[t * embed_dim + h * head_dim + d]
     
     int embed_dim = num_heads * head_dim;
     int batch_offset = batch_idx * tokens * embed_dim;
@@ -193,7 +193,7 @@ __kernel void mha_score_kernel(
                           (head_idx * tokens * tokens) + 
                           (i * tokens);
 
-    // ¸ðµç K ÅäÅ«¿¡ ´ëÇØ ³»Àû ¼öÇà (Loop j)
+    // ï¿½ï¿½ï¿½ K ï¿½ï¿½Å«ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ (Loop j)
     for (int j = 0; j < tokens; ++j) {
         float sum = 0.0f;
         int q_ptr = batch_offset + i * embed_dim + head_offset;
@@ -206,15 +206,50 @@ __kernel void mha_score_kernel(
     }
 }
 
+// 3D Range Version - Fully Parallel (no tiling)
+__kernel void mha_score_kernel_3d(
+    __global float* Q, __global float* K, __global float* scores,
+    int tokens, int head_dim, int num_heads, float scale)
+{
+    int bh = get_global_id(0); // Batch * Heads
+    int i  = get_global_id(1); // Token Q index (Row)
+    int j  = get_global_id(2); // Token K index (Col)
+
+    if (i >= tokens || j >= tokens) return;
+
+    int batch_idx = bh / num_heads;
+    int head_idx  = bh % num_heads;
+
+    int embed_dim = num_heads * head_dim;
+    int batch_offset = batch_idx * tokens * embed_dim;
+    int head_offset = head_idx * head_dim;
+
+    // Compute single dot product: Q[i] Â· K[j]
+    float sum = 0.0f;
+    int q_ptr = batch_offset + i * embed_dim + head_offset;
+    int k_ptr = batch_offset + j * embed_dim + head_offset;
+
+    for (int d = 0; d < head_dim; ++d) {
+        sum += Q[q_ptr + d] * K[k_ptr + d];
+    }
+
+    // Score Output: [Batch, Heads, Tokens, Tokens]
+    int score_idx = (batch_idx * num_heads * tokens * tokens) +
+                    (head_idx * tokens * tokens) +
+                    (i * tokens) + j;
+
+    scores[score_idx] = sum * scale;
+}
+
 __kernel void mha_softmax_kernel(__global float* scores, int tokens) {
     int bh = get_global_id(0);
     int i = get_global_id(1); // Row index
-    
+
     if (i >= tokens) return;
 
     int row_idx = bh * tokens * tokens + i * tokens;
 
-    // 1. Max Ã£±â
+    // 1. Max Ã£ï¿½ï¿½
     float max_val = -1e30f;
     for (int j = 0; j < tokens; j++) {
         max_val = fmax(max_val, scores[row_idx + j]);
@@ -247,16 +282,16 @@ __kernel void mha_context_kernel(
 
     int embed_dim = num_heads * head_dim;
     
-    // ÇöÀç e°¡ ¼ÓÇÑ Çìµå(h)¿Í Çìµå ³»ºÎ Â÷¿ø(d) °è»ê
+    // ï¿½ï¿½ï¿½ï¿½ eï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½(h)ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½(d) ï¿½ï¿½ï¿½
     int h = e / head_dim;
     int d = e % head_dim;
 
-    // Score ÀÐ±â À§Ä¡: [Batch, Head, i, :]
+    // Score ï¿½Ð±ï¿½ ï¿½ï¿½Ä¡: [Batch, Head, i, :]
     int score_base = (b * num_heads * tokens * tokens) + (h * tokens * tokens) + (i * tokens);
     
-    // V ÀÐ±â À§Ä¡: [Batch, :, Embed] -> V[b, j, e]°¡ ¾Æ´Ï¶ó Headº°·Î ¸ÂÃç¾ß ÇÔ.
-    // ¼øÂ÷ ÄÚµå V ±¸Á¶: [Batch, Tokens, Embed]. V[t * embed + h*head_dim + d]
-    // ¿ì¸®°¡ ÇÊ¿äÇÑ VÀÇ °ªÀº Æ¯Á¤ Head h, Â÷¿ø d¿¡ ´ëÇØ ¸ðµç ÅäÅ« j¸¦ ¼øÈ¸.
+    // V ï¿½Ð±ï¿½ ï¿½ï¿½Ä¡: [Batch, :, Embed] -> V[b, j, e]ï¿½ï¿½ ï¿½Æ´Ï¶ï¿½ Headï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½.
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½Úµï¿½ V ï¿½ï¿½ï¿½ï¿½: [Batch, Tokens, Embed]. V[t * embed + h*head_dim + d]
+    // ï¿½ì¸®ï¿½ï¿½ ï¿½Ê¿ï¿½ï¿½ï¿½ Vï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ Æ¯ï¿½ï¿½ Head h, ï¿½ï¿½ï¿½ï¿½ dï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½Å« jï¿½ï¿½ ï¿½ï¿½È¸.
     int v_batch_offset = b * tokens * embed_dim;
     int v_head_offset = h * head_dim; 
 
@@ -331,7 +366,7 @@ __kernel void linear_tiled_float4(
     
     // Global Index
     const int globalRow = TS * get_group_id(1) + row; 
-    const int globalCol = TS * get_group_id(0) + (col * 4); // float4 ±âÁØÀÌ¹Ç·Î *4
+    const int globalCol = TS * get_group_id(0) + (col * 4); // float4 ï¿½ï¿½ï¿½ï¿½ï¿½Ì¹Ç·ï¿½ *4
 
     // Local Memory (Padding +1 to avoid bank conflicts)
     __local float Asub[TS][TS + 1];

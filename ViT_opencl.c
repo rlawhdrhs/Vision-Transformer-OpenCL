@@ -20,7 +20,7 @@
 #define MAX_PROFILE_KERNELS 32
 #define ENABLE_PROFILING 1
 // --------------------------------------------------------
-// ÀÚ·á±¸Á¶ ¹× Àü¿ª º¯¼ö
+// ï¿½Ú·á±¸ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
 // --------------------------------------------------------
 typedef struct {
     cl_context context;
@@ -38,23 +38,23 @@ typedef struct {
     // Encoder Ping-Pong Buffers
     cl_mem enc_in;           // [Batch, 197, 768]
     cl_mem enc_out;          // [Batch, 197, 768]
-    cl_mem ln_buf;           // LayerNorm °á°ú ÀúÀå¿ë
-    cl_mem attn_res_buf;     // Attention °á°ú ÀúÀå¿ë
-    cl_mem mlp_res_buf;      // MLP °á°ú ÀúÀå¿ë
+    cl_mem ln_buf;           // LayerNorm ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
+    cl_mem attn_res_buf;     // Attention ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
+    cl_mem mlp_res_buf;      // MLP ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
 
     // MHA Internal
     cl_mem q_buf, k_buf, v_buf;
     cl_mem attn_score;       // [Batch, Heads, 197, 197]
-    cl_mem attn_out_linear;  // MHA ÃÖÁ¾ Linear Àü °á°ú
+    cl_mem attn_out_linear;  // MHA ï¿½ï¿½ï¿½ï¿½ Linear ï¿½ï¿½ ï¿½ï¿½ï¿½
 
     // MLP Internal
     cl_mem mlp_fc1_out;      // [Batch, 197, 3072]
 } ViT_Memory_Pool;
 
 typedef struct {
-    char name[64];       // Ä¿³Î ÀÌ¸§ (¿¹: "Linear", "Softmax")
-    double total_time_ms; // ´©Àû ½ÇÇà ½Ã°£ (¹Ð¸®ÃÊ)
-    long call_count;      // È£Ãâ È½¼ö
+    char name[64];       // Ä¿ï¿½ï¿½ ï¿½Ì¸ï¿½ (ï¿½ï¿½: "Linear", "Softmax")
+    double total_time_ms; // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½Ã°ï¿½ (ï¿½Ð¸ï¿½ï¿½ï¿½)
+    long call_count;      // È£ï¿½ï¿½ È½ï¿½ï¿½
 } KernelProfile;
 
 KernelProfile g_profiler[MAX_PROFILE_KERNELS];
@@ -96,7 +96,7 @@ void initialize_opencl() {
     CHECK_ERROR(err);
     free(source);
 
-    // Ä¿³Î ¹Ì¸® »ý¼º
+    // Ä¿ï¿½ï¿½ ï¿½Ì¸ï¿½ ï¿½ï¿½ï¿½ï¿½
     g_opencl.k_conv = clCreateKernel(g_opencl.program, "Conv2d_Batched_Kernel", &err);
     CHECK_ERROR(err);
     g_opencl.k_flat = clCreateKernel(g_opencl.program, "FlattenTranspose_Batched_Kernel", &err);
@@ -117,8 +117,13 @@ void initialize_opencl() {
     CHECK_ERROR(err);
     g_opencl.k_bias = clCreateKernel(g_opencl.program, "add_bias_broadcast_kernel", &err); 
     CHECK_ERROR(err);
-    g_opencl.k_score = clCreateKernel(g_opencl.program, "mha_score_kernel", &err);
+
+    //Tiling O 2d
+    //g_opencl.k_score = clCreateKernel(g_opencl.program, "mha_score_kernel", &err);
+    //Tiling x 3d
+    g_opencl.k_score = clCreateKernel(g_opencl.program, "mha_score_kernel_3d", &err);
     CHECK_ERROR(err);
+
     g_opencl.k_mha_soft = clCreateKernel(g_opencl.program, "mha_softmax_kernel", &err);
     CHECK_ERROR(err);
     g_opencl.k_context = clCreateKernel(g_opencl.program, "mha_context_kernel", &err);
@@ -454,7 +459,7 @@ void run_gemm(cl_mem A, cl_mem B, cl_mem C, int M, int N, int K, int transB,
     clSetKernelArg(g_opencl.k_gemm, 5, sizeof(int), &K);
     clSetKernelArg(g_opencl.k_gemm, 6, sizeof(int), &stride); // A_stride
     clSetKernelArg(g_opencl.k_gemm, 7, sizeof(int), &stride); // B_stride
-    clSetKernelArg(g_opencl.k_gemm, 8, sizeof(int), &stride); // C_stride: MHA ScoreÀÏ °æ¿ì ´Ù¸§ ÁÖÀÇ
+    clSetKernelArg(g_opencl.k_gemm, 8, sizeof(int), &stride); // C_stride: MHA Scoreï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½Ù¸ï¿½ ï¿½ï¿½ï¿½ï¿½
     clSetKernelArg(g_opencl.k_gemm, 9, sizeof(int), &A_off);
     clSetKernelArg(g_opencl.k_gemm, 10, sizeof(int), &B_off);
     clSetKernelArg(g_opencl.k_gemm, 11, sizeof(int), &C_off);
@@ -532,7 +537,12 @@ void MHA_batched(cl_mem in, cl_mem out, int w_idx, int b_idx, int out_w_idx, int
     // Step 2: Calculate Scores (Q * K^T)
     // -----------------------------------------------------
     // Global Size: [Batch * NumHeads, Tokens]
-    size_t score_global[2] = { (size_t)(batch_size * num_heads), (size_t)tokens };
+    
+    //Tiling o 2d
+    //size_t score_global[2] = { (size_t)(batch_size * num_heads), (size_t)tokens };
+    //Tiling x 3d
+    size_t score_global[3] = { (size_t)(batch_size * num_heads), (size_t)tokens, (size_t)tokens };
+
     int nh = num_heads;
 
     clSetKernelArg(g_opencl.k_score, 0, sizeof(cl_mem), &g_mem_pool.q_buf);
@@ -543,13 +553,14 @@ void MHA_batched(cl_mem in, cl_mem out, int w_idx, int b_idx, int out_w_idx, int
     clSetKernelArg(g_opencl.k_score, 5, sizeof(int), &nh);
     clSetKernelArg(g_opencl.k_score, 6, sizeof(float), &scale);
 
-    clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_score, 2, NULL, score_global, NULL, 0, NULL, NULL);
+    //clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_score, 2, NULL, score_global, NULL, 0, NULL, NULL);
+    clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_score, 3, NULL, score_global, NULL, 0, NULL, NULL);
 
 
     // -----------------------------------------------------
     // Step 3: Softmax
     // -----------------------------------------------------
-    // Global Size: [Batch * NumHeads, Tokens] (Score Kernel°ú µ¿ÀÏ)
+    // Global Size: [Batch * NumHeads, Tokens] (Score Kernelï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½)
     clSetKernelArg(g_opencl.k_mha_soft, 0, sizeof(cl_mem), &g_mem_pool.attn_score);
     clSetKernelArg(g_opencl.k_mha_soft, 1, sizeof(int), &tokens);
 
@@ -692,7 +703,7 @@ void ViT_opencl(ImageData *image, Network *networks, float **probabilities) {
         }
 
         free(batch_probs);
-        printf("%d ~ %d¹øÂ° ÀÌ¹ÌÁö ¿Ï·á\n", start_idx, (start_idx + batch_size) <= 100 ? (start_idx + batch_size) : 100);
+        printf("%d ~ %dï¿½ï¿½Â° ï¿½Ì¹ï¿½ï¿½ï¿½ ï¿½Ï·ï¿½\n", start_idx, (start_idx + batch_size) <= 100 ? (start_idx + batch_size) : 100);
     }
     clFinish(g_opencl.queue);
     clReleaseMemObject(prob_buf);
