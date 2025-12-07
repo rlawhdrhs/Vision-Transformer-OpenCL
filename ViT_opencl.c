@@ -20,13 +20,18 @@
 #define MAX_PROFILE_KERNELS 32
 #define ENABLE_PROFILING 1
 // --------------------------------------------------------
-// ÀÚ·á±¸Á¶ ¹× Àü¿ª º¯¼ö
+// ìë£Œêµ¬ì¡° ë° ì „ì—­ ë³€ìˆ˜
 // --------------------------------------------------------
 typedef struct {
     cl_context context;
     cl_command_queue queue;
     cl_program program;
     cl_kernel k_conv, k_flat, k_prep, k_ln, k_gemm, k_res, k_soft, k_gelu, k_lin, k_bias, k_score, k_mha_soft, k_context, k_lin_reg, k_cls_soft;
+
+    cl_kernel k_fc1_tiled;
+    cl_kernel k_gelu_tiled;
+    cl_kernel k_fc2_tiled;
+
     cl_device_id device;
 } OpenCL_Resources;
 
@@ -38,23 +43,23 @@ typedef struct {
     // Encoder Ping-Pong Buffers
     cl_mem enc_in;           // [Batch, 197, 768]
     cl_mem enc_out;          // [Batch, 197, 768]
-    cl_mem ln_buf;           // LayerNorm °á°ú ÀúÀå¿ë
-    cl_mem attn_res_buf;     // Attention °á°ú ÀúÀå¿ë
-    cl_mem mlp_res_buf;      // MLP °á°ú ÀúÀå¿ë
+    cl_mem ln_buf;           // LayerNorm ê²°ê³¼ ì €ì¥ìš©
+    cl_mem attn_res_buf;     // Attention ê²°ê³¼ ì €ì¥ìš©
+    cl_mem mlp_res_buf;      // MLP ê²°ê³¼ ì €ì¥ìš©
 
     // MHA Internal
     cl_mem q_buf, k_buf, v_buf;
     cl_mem attn_score;       // [Batch, Heads, 197, 197]
-    cl_mem attn_out_linear;  // MHA ÃÖÁ¾ Linear Àü °á°ú
+    cl_mem attn_out_linear;  // MHA ìµœì¢… Linear ì „ ê²°ê³¼
 
     // MLP Internal
     cl_mem mlp_fc1_out;      // [Batch, 197, 3072]
 } ViT_Memory_Pool;
 
 typedef struct {
-    char name[64];       // Ä¿³Î ÀÌ¸§ (¿¹: "Linear", "Softmax")
-    double total_time_ms; // ´©Àû ½ÇÇà ½Ã°£ (¹Ğ¸®ÃÊ)
-    long call_count;      // È£Ãâ È½¼ö
+    char name[64];       // ì»¤ë„ ì´ë¦„ (ì˜ˆ: "Linear", "Softmax")
+    double total_time_ms; // ëˆ„ì  ì‹¤í–‰ ì‹œê°„ (ë°€ë¦¬ì´ˆ)
+    long call_count;      // í˜¸ì¶œ íšŸìˆ˜
 } KernelProfile;
 
 KernelProfile g_profiler[MAX_PROFILE_KERNELS];
@@ -96,7 +101,7 @@ void initialize_opencl() {
     CHECK_ERROR(err);
     free(source);
 
-    // Ä¿³Î ¹Ì¸® »ı¼º
+    // ì»¤ë„ ë¯¸ë¦¬ ìƒì„±
     g_opencl.k_conv = clCreateKernel(g_opencl.program, "Conv2d_Batched_Kernel", &err);
     CHECK_ERROR(err);
     g_opencl.k_flat = clCreateKernel(g_opencl.program, "FlattenTranspose_Batched_Kernel", &err);
@@ -124,6 +129,13 @@ void initialize_opencl() {
     g_opencl.k_context = clCreateKernel(g_opencl.program, "mha_context_kernel", &err);
     CHECK_ERROR(err);
     g_opencl.k_cls_soft = clCreateKernel(g_opencl.program, "extract_cls_softmax_kernel", &err);
+    CHECK_ERROR(err);
+
+    g_opencl.k_fc1_tiled = clCreateKernel(g_opencl.program, "fc1_kernel", &err);
+    CHECK_ERROR(err);
+    g_opencl.k_gelu_tiled = clCreateKernel(g_opencl.program, "gelu_kernel", &err);
+    CHECK_ERROR(err);
+    g_opencl.k_fc2_tiled = clCreateKernel(g_opencl.program, "fc2_kernel", &err);
     CHECK_ERROR(err);
 }
 
@@ -240,6 +252,11 @@ void release_resources() {
     clReleaseKernel(g_opencl.k_gemm); clReleaseKernel(g_opencl.k_res);
     clReleaseKernel(g_opencl.k_soft); clReleaseKernel(g_opencl.k_gelu);
     clReleaseKernel(g_opencl.k_lin); clReleaseKernel(g_opencl.k_bias);
+
+    clReleaseKernel(g_opencl.k_fc1_tiled);
+    clReleaseKernel(g_opencl.k_gelu_tiled);
+    clReleaseKernel(g_opencl.k_fc2_tiled);
+
     clReleaseProgram(g_opencl.program);
     clReleaseCommandQueue(g_opencl.queue);
     clReleaseContext(g_opencl.context);
@@ -397,6 +414,15 @@ void run_layernorm(cl_mem in, cl_mem out, int w_idx, int b_idx, int total_tokens
 void run_linear(cl_mem in, cl_mem out, int w_idx, int b_idx, int tokens, int in_f, int out_f, int offset) {
     int TS = 32;
     int WPT = 4;
+
+    //size_t M_padded = (tokens + 31) / 32 * 32;
+    //size_t N_padded = (out_f + 31) / 32 * 32;
+
+    //// 2. WPT(4)ë¡œ ë‚˜ëˆ„ì–´ ê¸€ë¡œë²Œ ì›Œí¬ ì•„ì´í…œ ê°œìˆ˜ ì„¤ì •
+    //// ì˜ˆ: 32x32 íƒ€ì¼ì„ 8x8 ìŠ¤ë ˆë“œê°€ ì²˜ë¦¬í•˜ë¯€ë¡œ, ì°¨ì›ì€ 1/4ë¡œ ì¤„ì–´ë“¬
+    //size_t global[2] = { N_padded / 4, M_padded / 4 };
+    //size_t local[2] = { 8, 8 };
+
     size_t global_col = ((out_f + TS - 1) / TS) * (TS / WPT);
     size_t global_row = ((tokens + TS - 1) / TS) * TS;
 
@@ -454,7 +480,7 @@ void run_gemm(cl_mem A, cl_mem B, cl_mem C, int M, int N, int K, int transB,
     clSetKernelArg(g_opencl.k_gemm, 5, sizeof(int), &K);
     clSetKernelArg(g_opencl.k_gemm, 6, sizeof(int), &stride); // A_stride
     clSetKernelArg(g_opencl.k_gemm, 7, sizeof(int), &stride); // B_stride
-    clSetKernelArg(g_opencl.k_gemm, 8, sizeof(int), &stride); // C_stride: MHA ScoreÀÏ °æ¿ì ´Ù¸§ ÁÖÀÇ
+    clSetKernelArg(g_opencl.k_gemm, 8, sizeof(int), &stride); // C_stride: MHA Scoreì¼ ê²½ìš° ë‹¤ë¦„ ì£¼ì˜
     clSetKernelArg(g_opencl.k_gemm, 9, sizeof(int), &A_off);
     clSetKernelArg(g_opencl.k_gemm, 10, sizeof(int), &B_off);
     clSetKernelArg(g_opencl.k_gemm, 11, sizeof(int), &C_off);
@@ -549,7 +575,7 @@ void MHA_batched(cl_mem in, cl_mem out, int w_idx, int b_idx, int out_w_idx, int
     // -----------------------------------------------------
     // Step 3: Softmax
     // -----------------------------------------------------
-    // Global Size: [Batch * NumHeads, Tokens] (Score Kernel°ú µ¿ÀÏ)
+    // Global Size: [Batch * NumHeads, Tokens] (Score Kernelê³¼ ë™ì¼)
     clSetKernelArg(g_opencl.k_mha_soft, 0, sizeof(cl_mem), &g_mem_pool.attn_score);
     clSetKernelArg(g_opencl.k_mha_soft, 1, sizeof(int), &tokens);
 
@@ -586,6 +612,93 @@ void MLP_batched(cl_mem in, cl_mem out, int w1, int b1, int w2, int b2, int batc
     run_linear(in, g_mem_pool.mlp_fc1_out, w1, b1, total, embed_dim, hidden, 0);
     run_gelu(g_mem_pool.mlp_fc1_out, total * hidden);
     run_linear(g_mem_pool.mlp_fc1_out, out, w2, b2, total, hidden, embed_dim, 0);
+}
+
+void MLP_batched2(cl_mem in, cl_mem out, int w1_idx, int b1_idx, int w2_idx, int b2_idx, int batch_size)
+{
+    // 1. ì°¨ì› ê³„ì‚°
+    // tokens: í•œ ì´ë¯¸ì§€ë‹¹ í† í° ìˆ˜ (197)
+    // total_tokens: ë°°ì¹˜ë¥¼ í¬í•¨í•œ ì „ì²´ í† í° ìˆ˜ (Rows of Input Matrix)
+    int tokens_per_img = ((img_size / patch_size) * (img_size / patch_size)) + 1;
+    int total_tokens = tokens_per_img * batch_size;
+
+    int in_features = embed_dim;                // 768
+    int hidden = (int)(embed_dim * mlp_ratio);  // 3072
+    int out_features = embed_dim;               // 768
+
+    // ì¤‘ê°„ ê²°ê³¼ ë²„í¼ (ê¸°ì¡´ í’€ ì‚¬ìš©)
+    // MLP FC1ì˜ ê²°ê³¼ëŠ” g_mem_pool.mlp_fc1_out ì— ì €ì¥
+    cl_mem d_fc1out = g_mem_pool.mlp_fc1_out;
+
+    /* ----------------------------- FC1 (Tiled) ----------------------------- */
+    // Local Size: 16x16 (ì»¤ë„ì˜ #define TILE 16ê³¼ ì¼ì¹˜í•´ì•¼ í•¨)
+    size_t l_fc[2] = { 16, 16 };
+
+    // Global Size: 16ì˜ ë°°ìˆ˜ë¡œ íŒ¨ë”©
+    size_t g_fc1[2] = {
+        ((size_t)total_tokens + 16 - 1) / 16 * 16,
+        ((size_t)hidden + 16 - 1) / 16 * 16
+    };
+
+    clSetKernelArg(g_opencl.k_fc1_tiled, 0, sizeof(cl_mem), &in);
+    clSetKernelArg(g_opencl.k_fc1_tiled, 1, sizeof(cl_mem), &g_weight_buffers[w1_idx]);
+    clSetKernelArg(g_opencl.k_fc1_tiled, 2, sizeof(cl_mem), &g_weight_buffers[b1_idx]);
+    clSetKernelArg(g_opencl.k_fc1_tiled, 3, sizeof(cl_mem), &d_fc1out);
+    clSetKernelArg(g_opencl.k_fc1_tiled, 4, sizeof(int), &total_tokens);
+    clSetKernelArg(g_opencl.k_fc1_tiled, 5, sizeof(int), &in_features);
+    clSetKernelArg(g_opencl.k_fc1_tiled, 6, sizeof(int), &hidden);
+
+#ifdef ENABLE_PROFILING
+    cl_event ev_fc1;
+    clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_fc1_tiled, 2, NULL, g_fc1, l_fc, 0, NULL, &ev_fc1);
+    register_kernel_time("Linear", ev_fc1);
+    clReleaseEvent(ev_fc1);
+#else
+    clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_fc1_tiled, 2, NULL, g_fc1, l_fc, 0, NULL, NULL);
+#endif
+
+
+    /* ----------------------------- GELU (Optimized) ----------------------------- */
+    int total_hidden_elems = total_tokens * hidden;
+    size_t g_gelu = ((total_hidden_elems + 255) / 256) * 256;
+    size_t l_gelu = 256;
+
+    clSetKernelArg(g_opencl.k_gelu_tiled, 0, sizeof(cl_mem), &d_fc1out); // In-place
+    clSetKernelArg(g_opencl.k_gelu_tiled, 1, sizeof(int), &total_hidden_elems);
+
+#ifdef ENABLE_PROFILING
+    cl_event ev_gelu;
+    clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_gelu_tiled, 1, NULL, &g_gelu, &l_gelu, 0, NULL, &ev_gelu);
+    register_kernel_time("gelu", ev_gelu);
+    clReleaseEvent(ev_gelu);
+#else
+    clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_gelu_tiled, 1, NULL, &g_gelu, &l_gelu, 0, NULL, NULL);
+#endif
+
+
+    /* ----------------------------- FC2 (Tiled) ----------------------------- */
+    // Global Size ì¬ê³„ì‚° (Output feature sizeê°€ FC1ê³¼ ë‹¤ë¦„)
+    size_t g_fc2[2] = {
+        ((size_t)total_tokens + 16 - 1) / 16 * 16,
+        ((size_t)out_features + 16 - 1) / 16 * 16
+    };
+
+    clSetKernelArg(g_opencl.k_fc2_tiled, 0, sizeof(cl_mem), &d_fc1out); // Input is GELU output
+    clSetKernelArg(g_opencl.k_fc2_tiled, 1, sizeof(cl_mem), &g_weight_buffers[w2_idx]);
+    clSetKernelArg(g_opencl.k_fc2_tiled, 2, sizeof(cl_mem), &g_weight_buffers[b2_idx]);
+    clSetKernelArg(g_opencl.k_fc2_tiled, 3, sizeof(cl_mem), &out);      // Final Output
+    clSetKernelArg(g_opencl.k_fc2_tiled, 4, sizeof(int), &total_tokens);
+    clSetKernelArg(g_opencl.k_fc2_tiled, 5, sizeof(int), &hidden);
+    clSetKernelArg(g_opencl.k_fc2_tiled, 6, sizeof(int), &out_features);
+
+#ifdef ENABLE_PROFILING
+    cl_event ev_fc2;
+    clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_fc2_tiled, 2, NULL, g_fc2, l_fc, 0, NULL, &ev_fc2);
+    register_kernel_time("Linear", ev_fc2);
+    clReleaseEvent(ev_fc2);
+#else
+    clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_fc2_tiled, 2, NULL, g_fc2, l_fc, 0, NULL, NULL);
+#endif
 }
 
 void Encoder_batched(cl_mem in, cl_mem out, int *net_indices, int batch_size) {
@@ -692,7 +805,7 @@ void ViT_opencl(ImageData *image, Network *networks, float **probabilities) {
         }
 
         free(batch_probs);
-        printf("%d ~ %d¹øÂ° ÀÌ¹ÌÁö ¿Ï·á\n", start_idx, (start_idx + batch_size) <= 100 ? (start_idx + batch_size) : 100);
+        printf("%d ~ %dë²ˆì§¸ ì´ë¯¸ì§€ ì™„ë£Œ\n", start_idx, (start_idx + batch_size) <= 100 ? (start_idx + batch_size) : 100);
     }
     clFinish(g_opencl.queue);
     clReleaseMemObject(prob_buf);
