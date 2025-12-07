@@ -129,7 +129,7 @@ void Conv2d_opencl(float *input, float *output, Network weight, Network bias) {
     const size_t input_size = (size_t)in_chans * img_size * img_size * sizeof(float);
     const size_t output_size_bytes = (size_t)embed_dim * output_size * output_size * sizeof(float);
 
-    // --- 0. ¸Ş¸ğ¸® ¹öÆÛ »ı¼º ---
+    // --- 0. ë©”ëª¨ë¦¬ ë²„í¼ ìƒì„± ---
     cl_mem input_buf = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
                                       input_size, input, &err);
     CHECK_ERROR(err);
@@ -137,19 +137,19 @@ void Conv2d_opencl(float *input, float *output, Network weight, Network bias) {
     cl_mem weight_buf = create_weight_buffer(&weight); 
     cl_mem bias_buf = create_weight_buffer(&bias); 
 
-    // ÃÖÁ¾ °á°ú ¹öÆÛ
+    // ìµœì¢… ê²°ê³¼ ë²„í¼
     cl_mem output_buf = clCreateBuffer(g_opencl.context, CL_MEM_WRITE_ONLY, output_size_bytes, NULL, &err);
     CHECK_ERROR(err);
 
 
-    // --- 1.Conv2d Ä¿³Î ½ÇÇà ---
+    // --- 1.Conv2d ì»¤ë„ ì‹¤í–‰ ---
     cl_kernel conv2d_integrated_kernel = clCreateKernel(g_opencl.program, "Conv2d_Kernel", &err);
     CHECK_ERROR(err);
 
     // Global Size: [Output_Channel, Output_Height, Output_Width]
     size_t global_size_conv[3] = { (size_t)embed_dim, (size_t)output_size, (size_t)output_size };
 
-    // Ä¿³Î ÀÎÀÚ ¼³Á¤
+    // ì»¤ë„ ì¸ì ì„¤ì •
     int is = img_size;
     int ps = patch_size;
     int ic = in_chans;
@@ -162,14 +162,14 @@ void Conv2d_opencl(float *input, float *output, Network weight, Network bias) {
     clSetKernelArg(conv2d_integrated_kernel, 5, sizeof(int), &ps);
     clSetKernelArg(conv2d_integrated_kernel, 6, sizeof(int), &ic);
     clSetKernelArg(conv2d_integrated_kernel, 7, sizeof(int), &ed);
-    clSetKernelArg(conv2d_integrated_kernel, 8, sizeof(int), &output_size); // Output Size Ãß°¡
+    clSetKernelArg(conv2d_integrated_kernel, 8, sizeof(int), &output_size); // Output Size ì¶”ê°€
 
     err = clEnqueueNDRangeKernel(g_opencl.queue, conv2d_integrated_kernel, 3, NULL, global_size_conv, NULL, 0, NULL, NULL);
     CHECK_ERROR(err);
     clReleaseKernel(conv2d_integrated_kernel);
 
 
-    // --- 2. °á°ú °Ë»ö ¹× ÀÚ¿ø ÇØÁ¦ ---
+    // --- 2. ê²°ê³¼ ê²€ìƒ‰ ë° ìì› í•´ì œ ---
     clFinish(g_opencl.queue);
     err = clEnqueueReadBuffer(g_opencl.queue, output_buf, CL_TRUE, 0, output_size_bytes, output, 0, NULL, NULL);
     CHECK_ERROR(err);
@@ -183,47 +183,47 @@ void Conv2d_opencl(float *input, float *output, Network weight, Network bias) {
 void flatten_transpose_opencl(float *input, float *output) {
     cl_int err;
 
-    // »ó¼ö °è»ê (¿ÜºÎ #define °ª »ç¿ë)
+    // ìƒìˆ˜ ê³„ì‚° (ì™¸ë¶€ #define ê°’ ì‚¬ìš©)
     const int output_size = img_size / patch_size;
     const int num_patches = output_size * output_size; // 196
     const size_t input_size_bytes = (size_t)embed_dim * output_size * output_size * sizeof(float);
     const size_t output_size_bytes = (size_t)num_patches * embed_dim * sizeof(float);
 
-    // --- 1. ¸Ş¸ğ¸® ¹öÆÛ »ı¼º ---
+    // --- 1. ë©”ëª¨ë¦¬ ë²„í¼ ìƒì„± ---
 
-    // ÀÔ·Â ¹öÆÛ (Conv2d °á°ú)
+    // ì…ë ¥ ë²„í¼ (Conv2d ê²°ê³¼)
     cl_mem input_buf = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
         input_size_bytes, input, &err);
     CHECK_ERROR(err);
 
-    // Ãâ·Â ¹öÆÛ (Flattened, Transposed °á°ú)
+    // ì¶œë ¥ ë²„í¼ (Flattened, Transposed ê²°ê³¼)
     cl_mem output_buf = clCreateBuffer(g_opencl.context, CL_MEM_WRITE_ONLY, output_size_bytes, NULL, &err);
     CHECK_ERROR(err);
 
-    // --- 2. Ä¿³Î ½ÇÇà ---
+    // --- 2. ì»¤ë„ ì‹¤í–‰ ---
     cl_kernel flat_transpose_kernel = clCreateKernel(g_opencl.program, "FlattenTranspose_Kernel", &err);
     CHECK_ERROR(err);
 
     // Global Size: [num_patches, embed_dim] (196 x 768)
-    // Work-Item ÃÑ °³¼ö: 150,528°³
+    // Work-Item ì´ ê°œìˆ˜: 150,528ê°œ
     size_t global_size_flat[2] = { (size_t)num_patches, (size_t)embed_dim };
 
-    // Ä¿³Î ÀÎÀÚ ¼³Á¤
+    // ì»¤ë„ ì¸ì ì„¤ì •
     int ed = embed_dim;
     clSetKernelArg(flat_transpose_kernel, 0, sizeof(cl_mem), &input_buf);
     clSetKernelArg(flat_transpose_kernel, 1, sizeof(cl_mem), &output_buf);
     clSetKernelArg(flat_transpose_kernel, 2, sizeof(int), &output_size);
     clSetKernelArg(flat_transpose_kernel, 3, sizeof(int), &ed);
 
-    // Ä¿³Î ½ÇÇà
+    // ì»¤ë„ ì‹¤í–‰
     err = clEnqueueNDRangeKernel(g_opencl.queue, flat_transpose_kernel, 2, NULL, global_size_flat, NULL, 0, NULL, NULL);
     CHECK_ERROR(err);
     clReleaseKernel(flat_transpose_kernel);
 
-    // --- 3. °á°ú °Ë»ö ¹× ÀÚ¿ø ÇØÁ¦ ---
+    // --- 3. ê²°ê³¼ ê²€ìƒ‰ ë° ìì› í•´ì œ ---
     clFinish(g_opencl.queue);
 
-    // GPU °á°ú -> Host outputÀ¸·Î º¹»ç
+    // GPU ê²°ê³¼ -> Host outputìœ¼ë¡œ ë³µì‚¬
     err = clEnqueueReadBuffer(g_opencl.queue, output_buf, CL_TRUE, 0, output_size_bytes, output, 0, NULL, NULL);
     CHECK_ERROR(err);
 
@@ -256,7 +256,7 @@ void layer_norm_opencl(float *input, float *output, Network weight, Network bias
     const size_t local_size = 256;                      // local
     const size_t global_size = token * local_size;      // global(local * token)
 
-    size_t local_mem_size = (local_size * 2 + 2) * sizeof(float);   // E(x), E(x^2)ÀÇ ºĞÀÚ °ªÀ» reductionÇÒ ¸Ş¸ğ¸®(*2), ÃÖÁ¾ E(x), E(x^2)µµ ÀúÀåÇÒ °ø°£ (+2)
+    size_t local_mem_size = (local_size * 2 + 2) * sizeof(float);   // E(x), E(x^2)ì˜ ë¶„ì ê°’ì„ reductioní•  ë©”ëª¨ë¦¬(*2), ìµœì¢… E(x), E(x^2)ë„ ì €ì¥í•  ê³µê°„ (+2)
 
     err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &input_buf);
     CHECK_ERROR(err);
@@ -306,11 +306,11 @@ cl_int enqueue_gemm_stage(cl_command_queue queue, cl_kernel kernel,
     size_t M_padded = ((M + TS - 1) / TS) * TS; // M = 197 -> 198
     size_t K_padded = ((K + TS - 1) / TS) * TS; // K = 197 -> 198
 
-    // Global Work Size ¼³Á¤
+    // Global Work Size ì„¤ì •
     size_t global_work_size[2] = { K_padded, M_padded };
     size_t local_work_size[2] = { (size_t)TS, (size_t)TS };
 
-    // Ä¿³Î ÀÎÀÚ ¼³Á¤
+    // ì»¤ë„ ì¸ì ì„¤ì •
     err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &A);
     err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &B);
     err |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &C);
@@ -327,7 +327,7 @@ cl_int enqueue_gemm_stage(cl_command_queue queue, cl_kernel kernel,
     err |= clSetKernelArg(kernel, 13, sizeof(float), &scale_factor);
     CHECK_ERROR(err);
 
-    // Ä¿³Î ½ÇÇà
+    // ì»¤ë„ ì‹¤í–‰
     err = clEnqueueNDRangeKernel(queue, kernel, 2, NULL,
         global_work_size, local_work_size,
         num_events_in_wait_list, event_wait_list, event_out);
@@ -343,22 +343,22 @@ cl_int enqueue_softmax_stage(cl_command_queue queue, cl_kernel kernel,
 {
     cl_int err;
 
-    // ÇÏ³ªÀÇ WorkGroup(256 threads)ÀÌ ÇÏ³ªÀÇ Token Row¸¦ Ã³¸®ÇÏµµ·Ï ¼³Á¤
-    // Global Work Size = (Ã³¸®ÇÒ Çà °³¼ö) * (±×·ì ´ç ½º·¹µå ¼ö)
+    // í•˜ë‚˜ì˜ WorkGroup(256 threads)ì´ í•˜ë‚˜ì˜ Token Rowë¥¼ ì²˜ë¦¬í•˜ë„ë¡ ì„¤ì •
+    // Global Work Size = (ì²˜ë¦¬í•  í–‰ ê°œìˆ˜) * (ê·¸ë£¹ ë‹¹ ìŠ¤ë ˆë“œ ìˆ˜)
     size_t local_size = 256;
     size_t global_size = tokens * local_size;
 
     size_t global_work_size[1] = { global_size };
     size_t local_work_size[1] = { local_size };
 
-    // Ä¿³Î ÀÎÀÚ ¼³Á¤
+    // ì»¤ë„ ì¸ì ì„¤ì •
     err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &scores);
     err |= clSetKernelArg(kernel, 1, sizeof(int), &tokens);
     err |= clSetKernelArg(kernel, 2, sizeof(int), &score_offset);
-    //err |= clSetKernelArg(kernel, 3, local_mem_size, NULL); // ·ÎÄÃ ¸Ş¸ğ¸® Àü´Ş
+    //err |= clSetKernelArg(kernel, 3, local_mem_size, NULL); // ë¡œì»¬ ë©”ëª¨ë¦¬ ì „ë‹¬
     CHECK_ERROR(err);
 
-    // Ä¿³Î ½ÇÇà
+    // ì»¤ë„ ì‹¤í–‰
     err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL,
         global_work_size, local_work_size,
         num_events_in_wait_list, event_wait_list, event_out);
@@ -580,7 +580,7 @@ void multihead_attn_opencl(float *input, float *output,
     free(Q); free(K); free(V);
     end = clock();
     //printf("Opencl attn time: %f sec\n", (double)(end - start) / CLK_TCK);
-    // ÃÖÁ¾ ¼±Çü ÇÁ·ÎÁ§¼Ç
+    // ìµœì¢… ì„ í˜• í”„ë¡œì ì…˜
     /*for (int t = 0; t < tokens; t++) {
         for (int i = 0; i < embed_dim; i++) {
             float sum = out_bias.data[i];
@@ -604,8 +604,8 @@ void multihead_attn_opencl(float *input, float *output,
 
 
 
-// MLP ºí·Ï(OpenCL+CPU) ½Ã°£ ÃøÁ¤ Æ÷ÇÔ ¹öÀü(·ùÅÂ¿ì)
-void mlp_block_opencl(float *input, float *output,
+// MLP ë¸”ë¡(OpenCL+CPU) ì‹œê°„ ì¸¡ì • í¬í•¨ ë²„ì „(ë¥˜íƒœìš°)
+void mlp_block_opencl(float* input, float* output,
     Network fc1_weight, Network fc1_bias,
     Network fc2_weight, Network fc2_bias)
 {
@@ -620,7 +620,7 @@ void mlp_block_opencl(float *input, float *output,
     size_t size_hidden = sizeof(float) * tokens * hidden;
     size_t size_out = sizeof(float) * tokens * out_features;
 
-    /* ----------------------------- Å¸ÀÌ¸Ó ½ÃÀÛ ----------------------------- */
+    /* ----------------------------- íƒ€ì´ë¨¸ ì‹œì‘ ----------------------------- */
     clock_t start_mlp = clock();
     /* ---------------------------------------------------------------------- */
 
@@ -639,7 +639,13 @@ void mlp_block_opencl(float *input, float *output,
 
     cl_kernel k_fc1 = clCreateKernel(g_opencl.program, "fc1_kernel", &err);
 
-    size_t g_fc1[2] = { (size_t)tokens, (size_t)hidden };
+    size_t l_fc[2] = { 16, 16 };
+
+    // global sizeë¥¼ 16ì˜ ë°°ìˆ˜ë¡œ ì˜¬ë¦¼(padding)
+    size_t g_fc1[2] = {
+        ((size_t)tokens + 16 - 1) / 16 * 16,
+        ((size_t)hidden + 16 - 1) / 16 * 16
+    };
 
     clSetKernelArg(k_fc1, 0, sizeof(cl_mem), &d_input);
     clSetKernelArg(k_fc1, 1, sizeof(cl_mem), &d_w1);
@@ -649,7 +655,8 @@ void mlp_block_opencl(float *input, float *output,
     clSetKernelArg(k_fc1, 5, sizeof(int), &in_features);
     clSetKernelArg(k_fc1, 6, sizeof(int), &hidden);
 
-    clEnqueueNDRangeKernel(g_opencl.queue, k_fc1, 2, NULL, g_fc1, NULL, 0, NULL, NULL);
+    clEnqueueNDRangeKernel(g_opencl.queue, k_fc1, 2, NULL,
+        g_fc1, l_fc, 0, NULL, NULL);
 
 
     /* ----------------------------- GELU ----------------------------- */
@@ -677,7 +684,11 @@ void mlp_block_opencl(float *input, float *output,
         size_out, NULL, &err);
 
     cl_kernel k_fc2 = clCreateKernel(g_opencl.program, "fc2_kernel", &err);
-    size_t g_fc2[2] = { (size_t)tokens, (size_t)out_features };
+
+    size_t g_fc2[2] = {
+        ((size_t)tokens + 16 - 1) / 16 * 16,
+        ((size_t)out_features + 16 - 1) / 16 * 16
+    };
 
     clSetKernelArg(k_fc2, 0, sizeof(cl_mem), &d_fc1out);
     clSetKernelArg(k_fc2, 1, sizeof(cl_mem), &d_w2);
@@ -688,21 +699,20 @@ void mlp_block_opencl(float *input, float *output,
     clSetKernelArg(k_fc2, 6, sizeof(int), &out_features);
 
     clEnqueueNDRangeKernel(g_opencl.queue, k_fc2, 2, NULL,
-        g_fc2, NULL, 0, NULL, NULL);
+        g_fc2, l_fc, 0, NULL, NULL);
 
 
-    /* -------------------------- °á°ú ÀĞ±â -------------------------- */
+    /* -------------------------- ê²°ê³¼ ì½ê¸° -------------------------- */
     clFinish(g_opencl.queue);
 
     clEnqueueReadBuffer(g_opencl.queue, d_fc2out, CL_TRUE,
         0, size_out, output, 0, NULL, NULL);
 
 
-    /* ----------------------------- Å¸ÀÌ¸Ó Á¾·á ----------------------------- */
+    /* ----------------------------- íƒ€ì´ë¨¸ ì¢…ë£Œ ----------------------------- */
     clock_t end_mlp = clock();
     double mlp_time_sec = (double)(end_mlp - start_mlp) / CLOCKS_PER_SEC;
-    //printf("MLP OpenCL time: %.6f sec\n", mlp_time_sec);
-    /* ----------------------------------------------------------------------- */
+    printf("MLP OpenCL time: %.6f sec\n", mlp_time_sec);
 
 
     /* -------------------------- CLEAN UP --------------------------- */
@@ -736,7 +746,7 @@ void Encoder_opencl(float *input, float *output,
     start = clock();
     layer_norm_opencl(input, ln1_out, ln1_w, ln1_b);
     end = clock();
-    //printf("Opencl Á¤±ÔÈ­ time: %f sec\n", (double)(end - start) / CLK_TCK);
+    //printf("Opencl ì •ê·œí™” time: %f sec\n", (double)(end - start) / CLK_TCK);
 
     /*Attn*/
     start = clock();
@@ -753,7 +763,7 @@ void Encoder_opencl(float *input, float *output,
     start = clock();
     layer_norm_opencl(residual, ln2_out, ln2_w, ln2_b);
     end = clock();
-    //printf("Opencl Á¤±ÔÈ­ time: %f sec\n", (double)(end - start) / CLK_TCK);
+    //printf("Opencl ì •ê·œí™” time: %f sec\n", (double)(end - start) / CLK_TCK);
     /*MLP*/
     start = clock();
     mlp_block_opencl(ln2_out, mlp_out, mlp1_w, mlp1_b, mlp2_w, mlp2_b);
@@ -861,13 +871,13 @@ void ViT_opencl(ImageData *image, Network *networks, float **probabilities) {
             networks[144], networks[145], networks[146], networks[147]);
 
         layer_norm_opencl(enc_layer[11], enc_output, networks[148], networks[149]);
-        /* Token °ª ÃßÃâ */
+        /* Token ê°’ ì¶”ì¶œ */
         float *cls_token = (float *)malloc(sizeof(float) * embed_dim);
         float *cls_output = (float *)malloc(sizeof(float) * num_classes);
         memcpy(cls_token, enc_output, sizeof(float) * embed_dim);
 
         linear_layer_opencl(cls_token, cls_output, 1, embed_dim, num_classes, networks[150], networks[151]);
-        /* È®·üºĞÆ÷ ÃßÃâ */
+        /* í™•ë¥ ë¶„í¬ ì¶”ì¶œ */
         Softmax(cls_output, probabilities[i], num_classes);
     }
 }
