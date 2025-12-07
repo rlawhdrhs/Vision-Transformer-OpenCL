@@ -652,24 +652,6 @@ __kernel void fc1_kernel(
 
 
 
-// ======================================================
-// ================== GELU (Same) ========================
-// ======================================================
-__kernel void gelu_kernel(
-    __global float* data,
-    int total)
-{
-    int idx = get_global_id(0);
-    if (idx >= total) return;
-
-    float x = data[idx];
-    float c = 0.7978845608f * (x + 0.044715f * x * x * x);
-    float gelu = 0.5f * x * (1.0f + tanh(c));
-
-    data[idx] = gelu;
-}
-
-
 
 // ======================================================
 // ================== FC2 (Tiled, Safe) ==================
