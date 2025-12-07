@@ -616,29 +616,42 @@ void MLP_batched(cl_mem in, cl_mem out, int w1, int b1, int w2, int b2, int batc
 
 void MLP_batched2(cl_mem in, cl_mem out, int w1_idx, int b1_idx, int w2_idx, int b2_idx, int batch_size)
 {
-    // 1. 차원 계산
-    // tokens: 한 이미지당 토큰 수 (197)
-    // total_tokens: 배치를 포함한 전체 토큰 수 (Rows of Input Matrix)
-    int tokens_per_img = ((img_size / patch_size) * (img_size / patch_size)) + 1;
-    int total_tokens = tokens_per_img * batch_size;
+    /* ----------- 여기서 필요한 변수들을 함수 맨 위에 전부 선언 ----------- */
+    cl_mem d_fc1out;
+    size_t l_fc[2];
+    size_t g_fc1[2];
+    int tokens_per_img;
+    int total_tokens;
+    int in_features;
+    int hidden;
+    int out_features;
+    int total_hidden_elems;
+    size_t g_gelu;
+    size_t l_gelu;
+    size_t g_fc2[2];
 
-    int in_features = embed_dim;                // 768
-    int hidden = (int)(embed_dim * mlp_ratio);  // 3072
-    int out_features = embed_dim;               // 768
+#ifdef ENABLE_PROFILING
+    cl_event ev_fc1, ev_gelu, ev_fc2;
+#endif
 
-    // 중간 결과 버퍼 (기존 풀 사용)
-    // MLP FC1의 결과는 g_mem_pool.mlp_fc1_out 에 저장
-    cl_mem d_fc1out = g_mem_pool.mlp_fc1_out;
+    /* ----------------------------- 계산 시작 ----------------------------- */
+
+    tokens_per_img = ((img_size / patch_size) * (img_size / patch_size)) + 1;
+    total_tokens = tokens_per_img * batch_size;
+
+    in_features = embed_dim;
+    hidden = (int)(embed_dim * mlp_ratio);
+    out_features = embed_dim;
+
+    /* 중간 결과 버퍼 */
+    d_fc1out = g_mem_pool.mlp_fc1_out;
 
     /* ----------------------------- FC1 (Tiled) ----------------------------- */
-    // Local Size: 16x16 (커널의 #define TILE 16과 일치해야 함)
-    size_t l_fc[2] = { 16, 16 };
+    l_fc[0] = 16;
+    l_fc[1] = 16;
 
-    // Global Size: 16의 배수로 패딩
-    size_t g_fc1[2] = {
-        ((size_t)total_tokens + 16 - 1) / 16 * 16,
-        ((size_t)hidden + 16 - 1) / 16 * 16
-    };
+    g_fc1[0] = ((size_t)total_tokens + 16 - 1) / 16 * 16;
+    g_fc1[1] = ((size_t)hidden + 16 - 1) / 16 * 16;
 
     clSetKernelArg(g_opencl.k_fc1_tiled, 0, sizeof(cl_mem), &in);
     clSetKernelArg(g_opencl.k_fc1_tiled, 1, sizeof(cl_mem), &g_weight_buffers[w1_idx]);
@@ -649,7 +662,6 @@ void MLP_batched2(cl_mem in, cl_mem out, int w1_idx, int b1_idx, int w2_idx, int
     clSetKernelArg(g_opencl.k_fc1_tiled, 6, sizeof(int), &hidden);
 
 #ifdef ENABLE_PROFILING
-    cl_event ev_fc1;
     clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_fc1_tiled, 2, NULL, g_fc1, l_fc, 0, NULL, &ev_fc1);
     register_kernel_time("Linear", ev_fc1);
     clReleaseEvent(ev_fc1);
@@ -657,17 +669,15 @@ void MLP_batched2(cl_mem in, cl_mem out, int w1_idx, int b1_idx, int w2_idx, int
     clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_fc1_tiled, 2, NULL, g_fc1, l_fc, 0, NULL, NULL);
 #endif
 
+    /* ----------------------------- GELU ----------------------------- */
+    total_hidden_elems = total_tokens * hidden;
+    g_gelu = ((total_hidden_elems + 255) / 256) * 256;
+    l_gelu = 256;
 
-    /* ----------------------------- GELU (Optimized) ----------------------------- */
-    int total_hidden_elems = total_tokens * hidden;
-    size_t g_gelu = ((total_hidden_elems + 255) / 256) * 256;
-    size_t l_gelu = 256;
-
-    clSetKernelArg(g_opencl.k_gelu_tiled, 0, sizeof(cl_mem), &d_fc1out); // In-place
+    clSetKernelArg(g_opencl.k_gelu_tiled, 0, sizeof(cl_mem), &d_fc1out);
     clSetKernelArg(g_opencl.k_gelu_tiled, 1, sizeof(int), &total_hidden_elems);
 
 #ifdef ENABLE_PROFILING
-    cl_event ev_gelu;
     clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_gelu_tiled, 1, NULL, &g_gelu, &l_gelu, 0, NULL, &ev_gelu);
     register_kernel_time("gelu", ev_gelu);
     clReleaseEvent(ev_gelu);
@@ -675,24 +685,19 @@ void MLP_batched2(cl_mem in, cl_mem out, int w1_idx, int b1_idx, int w2_idx, int
     clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_gelu_tiled, 1, NULL, &g_gelu, &l_gelu, 0, NULL, NULL);
 #endif
 
+    /* ----------------------------- FC2 ----------------------------- */
+    g_fc2[0] = ((size_t)total_tokens + 16 - 1) / 16 * 16;
+    g_fc2[1] = ((size_t)out_features + 16 - 1) / 16 * 16;
 
-    /* ----------------------------- FC2 (Tiled) ----------------------------- */
-    // Global Size 재계산 (Output feature size가 FC1과 다름)
-    size_t g_fc2[2] = {
-        ((size_t)total_tokens + 16 - 1) / 16 * 16,
-        ((size_t)out_features + 16 - 1) / 16 * 16
-    };
-
-    clSetKernelArg(g_opencl.k_fc2_tiled, 0, sizeof(cl_mem), &d_fc1out); // Input is GELU output
+    clSetKernelArg(g_opencl.k_fc2_tiled, 0, sizeof(cl_mem), &d_fc1out);
     clSetKernelArg(g_opencl.k_fc2_tiled, 1, sizeof(cl_mem), &g_weight_buffers[w2_idx]);
     clSetKernelArg(g_opencl.k_fc2_tiled, 2, sizeof(cl_mem), &g_weight_buffers[b2_idx]);
-    clSetKernelArg(g_opencl.k_fc2_tiled, 3, sizeof(cl_mem), &out);      // Final Output
+    clSetKernelArg(g_opencl.k_fc2_tiled, 3, sizeof(cl_mem), &out);
     clSetKernelArg(g_opencl.k_fc2_tiled, 4, sizeof(int), &total_tokens);
     clSetKernelArg(g_opencl.k_fc2_tiled, 5, sizeof(int), &hidden);
     clSetKernelArg(g_opencl.k_fc2_tiled, 6, sizeof(int), &out_features);
 
 #ifdef ENABLE_PROFILING
-    cl_event ev_fc2;
     clEnqueueNDRangeKernel(g_opencl.queue, g_opencl.k_fc2_tiled, 2, NULL, g_fc2, l_fc, 0, NULL, &ev_fc2);
     register_kernel_time("Linear", ev_fc2);
     clReleaseEvent(ev_fc2);
