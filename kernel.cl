@@ -1,4 +1,4 @@
-#define TS 32
+#define TS 16
 
 // 1. Bias Broadcast
 __kernel void add_bias_broadcast_kernel(
@@ -170,81 +170,69 @@ __kernel void mha_score_kernel(
     __global float* Q, __global float* K, __global float* scores,
     int tokens, int head_dim, int num_heads, float scale)
 {
-    int bh = get_global_id(0); // Batch * Heads
-    int i  = get_global_id(1); // Token Q index (Row)
+    // Global ID
+    int batch_head = get_group_id(2); // Batch * NumHeads
+    int row = get_global_id(1);       // Token Q (M)
+    int col = get_global_id(0);       // Token K (N)
 
-    if (i >= tokens) return;
+    // Local ID
+    int local_row = get_local_id(1);
+    int local_col = get_local_id(0);
 
-    // ���� ��ġ�� ��� ���
-    int batch_idx = bh / num_heads;
-    int head_idx  = bh % num_heads;
+    // Local Memory (Shared)
+    __local float Q_tile[TS][TS + 1]; // Bank Conflict ���� �е�
+    __local float K_tile[TS][TS + 1];
 
-    // �޸� ������ ���
-    // Q, K ����: [Batch, Tokens, EmbedDim] (EmbedDim �ȿ� Heads�� ���͸��� �Ǿ� ����)
-    // ���� �ڵ�: Q[t * embed_dim + h * head_dim + d]
+    int batch_idx = batch_head / num_heads;
+    int head_idx  = batch_head % num_heads;
     
+    // Offset ���
+    // Q, K ����: [Batch, Tokens, EmbedDim] (EmbedDim = NumHeads * HeadDim)
     int embed_dim = num_heads * head_dim;
-    int batch_offset = batch_idx * tokens * embed_dim;
-    int head_offset = head_idx * head_dim;
+    int base_offset = batch_idx * tokens * embed_dim + head_idx * head_dim;
 
-    // Score Output: [Batch, Heads, Tokens, Tokens]
-    // Score Offset: batch * (Heads*Tokens*Tokens) + head * (Tokens*Tokens) + i * Tokens
-    int score_row_start = (batch_idx * num_heads * tokens * tokens) + 
-                          (head_idx * tokens * tokens) + 
-                          (i * tokens);
-
-    // ��� K ��ū�� ���� ���� ���� (Loop j)
-    for (int j = 0; j < tokens; ++j) {
-        float sum = 0.0f;
-        int q_ptr = batch_offset + i * embed_dim + head_offset;
-        int k_ptr = batch_offset + j * embed_dim + head_offset;
-
-        for (int d = 0; d < head_dim; ++d) {
-            sum += Q[q_ptr + d] * K[k_ptr + d];
-        }
-        scores[score_row_start + j] = sum * scale;
-    }
-}
-
-// 3D Range Version - Fully Parallel (no tiling)
-__kernel void mha_score_kernel_3d(
-    __global float* Q, __global float* K, __global float* scores,
-    int tokens, int head_dim, int num_heads, float scale)
-{
-    int bh = get_global_id(0); // Batch * Heads
-    int i  = get_global_id(1); // Token Q index (Row)
-    int j  = get_global_id(2); // Token K index (Col)
-
-    if (i >= tokens || j >= tokens) return;
-
-    int batch_idx = bh / num_heads;
-    int head_idx  = bh % num_heads;
-
-    int embed_dim = num_heads * head_dim;
-    int batch_offset = batch_idx * tokens * embed_dim;
-    int head_offset = head_idx * head_dim;
-
-    // Compute single dot product: Q[i] · K[j]
     float sum = 0.0f;
-    int q_ptr = batch_offset + i * embed_dim + head_offset;
-    int k_ptr = batch_offset + j * embed_dim + head_offset;
+    int num_tiles = (head_dim + TS - 1) / TS;
 
-    for (int d = 0; d < head_dim; ++d) {
-        sum += Q[q_ptr + d] * K[k_ptr + d];
+    for (int t = 0; t < num_tiles; t++) {
+        int tiled_d = t * TS;
+
+        int q_d = tiled_d + local_col;
+        if (row < tokens && q_d < head_dim)
+            Q_tile[local_row][local_col] = Q[base_offset + row * embed_dim + q_d];
+        else
+            Q_tile[local_row][local_col] = 0.0f;
+
+        int k_d = tiled_d + local_row; // Transposed loading trick
+        
+        int k_token = col; 
+        int k_dim   = tiled_d + local_row; // Loop variable match
+        
+
+        if (col < tokens && (tiled_d + local_row) < head_dim)
+            K_tile[local_col][local_row] = K[base_offset + col * embed_dim + (tiled_d + local_row)];
+        else
+            K_tile[local_col][local_row] = 0.0f;
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int k = 0; k < TS; k++) {
+            sum += Q_tile[local_row][k] * K_tile[local_col][k]; // K�� ������ Transpose�ؼ� �ε���
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
 
-    // Score Output: [Batch, Heads, Tokens, Tokens]
-    int score_idx = (batch_idx * num_heads * tokens * tokens) +
-                    (head_idx * tokens * tokens) +
-                    (i * tokens) + j;
-
-    scores[score_idx] = sum * scale;
+    if (row < tokens && col < tokens) {
+        // Scores: [Batch, NumHeads, Tokens, Tokens]
+        int score_idx = (batch_head * tokens * tokens) + (row * tokens) + col;
+        scores[score_idx] = sum * scale;
+    }
 }
 
 __kernel void mha_softmax_kernel(__global float* scores, int tokens) {
     int bh = get_global_id(0);
     int i = get_global_id(1); // Row index
-
+    
     if (i >= tokens) return;
 
     int row_idx = bh * tokens * tokens + i * tokens;
@@ -274,35 +262,62 @@ __kernel void mha_context_kernel(
     __global float* scores, __global float* V, __global float* output,
     int tokens, int head_dim, int num_heads)
 {
-    int b = get_global_id(0);
-    int i = get_global_id(1); // Output Token Index
-    int e = get_global_id(2); // Embed Dim Index (0..767)
+    // Global ID
+    int batch_head = get_group_id(2);
+    int row = get_global_id(1); // Output Token Index (Row of Score)
+    int col = get_global_id(0); // Head Dim Index (Col of V)
 
-    if (i >= tokens || e >= (num_heads * head_dim)) return;
+    // Local ID
+    int local_row = get_local_id(1);
+    int local_col = get_local_id(0);
+
+    __local float S_tile[TS][TS + 1];
+    __local float V_tile[TS][TS + 1];
+
+    int batch_idx = batch_head / num_heads;
+    int head_idx  = batch_head % num_heads;
 
     int embed_dim = num_heads * head_dim;
     
-    // ���� e�� ���� ���(h)�� ��� ���� ����(d) ���
-    int h = e / head_dim;
-    int d = e % head_dim;
-
-    // Score �б� ��ġ: [Batch, Head, i, :]
-    int score_base = (b * num_heads * tokens * tokens) + (h * tokens * tokens) + (i * tokens);
-    
-    // V �б� ��ġ: [Batch, :, Embed] -> V[b, j, e]�� �ƴ϶� Head���� ����� ��.
-    // ���� �ڵ� V ����: [Batch, Tokens, Embed]. V[t * embed + h*head_dim + d]
-    // �츮�� �ʿ��� V�� ���� Ư�� Head h, ���� d�� ���� ��� ��ū j�� ��ȸ.
-    int v_batch_offset = b * tokens * embed_dim;
-    int v_head_offset = h * head_dim; 
+    // Offsets
+    int score_base = batch_head * tokens * tokens;
+    int v_base = batch_idx * tokens * embed_dim + head_idx * head_dim;
+    int out_base = batch_idx * tokens * embed_dim + head_idx * head_dim; // V�� ���� ����
 
     float sum = 0.0f;
-    for (int j = 0; j < tokens; ++j) {
-        float s = scores[score_base + j];
-        float v_val = V[v_batch_offset + j * embed_dim + v_head_offset + d];
-        sum += s * v_val;
+    int num_tiles = (tokens + TS - 1) / TS;
+
+    for (int t = 0; t < num_tiles; t++) {
+        int tiled_k = t * TS; // Common dimension (Tokens)
+
+        // 1. Load Score Tile [Row, K]
+        int s_k = tiled_k + local_col;
+        if (row < tokens && s_k < tokens)
+            S_tile[local_row][local_col] = scores[score_base + row * tokens + s_k];
+        else
+            S_tile[local_row][local_col] = 0.0f;
+
+        // 2. Load V Tile [K, Col]
+        int v_k = tiled_k + local_row;
+        if (v_k < tokens && col < head_dim)
+            V_tile[local_row][local_col] = V[v_base + v_k * embed_dim + col];
+        else
+            V_tile[local_row][local_col] = 0.0f;
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // 3. Compute
+        for (int k = 0; k < TS; k++) {
+            sum += S_tile[local_row][k] * V_tile[k][local_col];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
 
-    output[b * tokens * embed_dim + i * embed_dim + e] = sum;
+    // Store
+    if (row < tokens && col < head_dim) {
+        // Output: [Batch, Tokens, EmbedDim] (Interleaved heads)
+        output[out_base + row * embed_dim + col] = sum;
+    }
 }
 
 // 6. Residual Add (Elementwise)
@@ -352,7 +367,7 @@ __kernel void softmax_reduction_kernel(__global float* scores, int tokens, int o
 }
 
 // 8. Linear (Dense)
-__kernel void linear_tiled_float4(
+__kernel void linear_kernel(
     int M, int N, int K,
     __global const float* A,
     __global const float* B,
@@ -422,6 +437,85 @@ __kernel void linear_tiled_float4(
         __global float4* C_ptr = (__global float4*)&C[globalRow * N + globalCol];
         *C_ptr = acc + b_val;
     }
+}
+// 9. GELU
+__kernel void gelu_kernel(__global float* data, int total) {
+    int idx = get_global_id(0);
+    if (idx < total) {
+        float x = data[idx];
+        float val = 0.5f * x * (1.0f + erf(x * 0.70710678118f));
+        
+        data[idx] = val;
+    }
+}
+
+// 10. Prepare Input
+__kernel void prepare_class_pos_kernel(
+    __global float* flat_in, __global float* enc_in,
+    __global float* cls_tok, __global float* pos_emb,
+    int batch_size, int embed_dim, int num_patches)
+{
+    int b = get_global_id(0);
+    int t = get_global_id(1);
+    int e = get_global_id(2);
+    if (b >= batch_size || t > num_patches || e >= embed_dim) return;
+
+    float val = (t == 0) ? cls_tok[e] : flat_in[b * num_patches * embed_dim + (t - 1) * embed_dim + e];
+    enc_in[b * (num_patches + 1) * embed_dim + t * embed_dim + e] = val + pos_emb[t * embed_dim + e];
+}
+
+
+__kernel void extract_cls_softmax_kernel(
+    __global float* src_logits, __global float* output_probs,
+    int num_classes, int seq_len) 
+{
+    int b = get_global_id(0);
+    int offset = b * seq_len * num_classes; 
+    float max_val = -1e30f;
+    for (int i = 0; i < num_classes; ++i) max_val = fmax(max_val, src_logits[offset + i]);
+    float sum = 0.0f;
+    for (int i = 0; i < num_classes; ++i) {
+        float val = exp(src_logits[offset + i] - max_val);
+        output_probs[b * num_classes + i] = val; 
+        sum += val;
+    }
+    float inv_sum = 1.0f / sum;
+    for (int i = 0; i < num_classes; ++i) output_probs[b * num_classes + i] *= inv_sum;
+}
+
+// 3D Range Version - Fully Parallel (no tiling)
+__kernel void mha_score_kernel_3d(
+    __global float* Q, __global float* K, __global float* scores,
+    int tokens, int head_dim, int num_heads, float scale)
+{
+    int bh = get_global_id(0); // Batch * Heads
+    int i  = get_global_id(1); // Token Q index (Row)
+    int j  = get_global_id(2); // Token K index (Col)
+
+    if (i >= tokens || j >= tokens) return;
+
+    int batch_idx = bh / num_heads;
+    int head_idx  = bh % num_heads;
+
+    int embed_dim = num_heads * head_dim;
+    int batch_offset = batch_idx * tokens * embed_dim;
+    int head_offset = head_idx * head_dim;
+
+    // Compute single dot product: Q[i] · K[j]
+    float sum = 0.0f;
+    int q_ptr = batch_offset + i * embed_dim + head_offset;
+    int k_ptr = batch_offset + j * embed_dim + head_offset;
+
+    for (int d = 0; d < head_dim; ++d) {
+        sum += Q[q_ptr + d] * K[k_ptr + d];
+    }
+
+    // Score Output: [Batch, Heads, Tokens, Tokens]
+    int score_idx = (batch_idx * num_heads * tokens * tokens) +
+                    (head_idx * tokens * tokens) +
+                    (i * tokens) + j;
+
+    scores[score_idx] = sum * scale;
 }
 
 // Fused QKV Kernel (Original - uses more local memory but faster)
@@ -506,310 +600,4 @@ __kernel void linear_qkv_fused_float4(
         *(__global float4*)&k_out[globalRow * N + globalCol] = acc_k + b_k;
         *(__global float4*)&v_out[globalRow * N + globalCol] = acc_v + b_v;
     }
-}
-
-/*
-// Unified QKV Kernel - Optimized for low local memory usage (SLOWER - disabled)
-#define QKV_TS 16
-
-__kernel void linear_qkv_unified(
-    int M,              // Tokens (197)
-    int N,              // Embed Dim (768)
-    int K_dim,          // Embed Dim (768)
-    __global const float* A,        // Input [M, K]
-    __global const float* W,        // Weight [3*N, K]
-    __global const float* bias,     // Bias [3*N]
-    __global float* q_out,
-    __global float* k_out,
-    __global float* v_out)
-{
-    const int row = get_local_id(1);  // 0..15
-    const int col = get_local_id(0);  // 0..15
-
-    const int globalRow = QKV_TS * get_group_id(1) + row;
-    const int globalCol = (QKV_TS * get_group_id(0) + col) * 4;  // Output column (0..2303)
-
-    __local float Asub[QKV_TS][QKV_TS];
-    __local float Wsub[QKV_TS][QKV_TS];
-
-    float4 acc = (float4)(0.0f);
-
-    const int numTiles = (K_dim + QKV_TS - 1) / QKV_TS;  // 768/16 = 48
-
-    for (int t = 0; t < numTiles; t++) {
-        // Load input tile A
-        int tiledCol_A = t * QKV_TS + col;
-        if (globalRow < M && tiledCol_A < K_dim)
-            Asub[row][col] = A[globalRow * K_dim + tiledCol_A];
-        else
-            Asub[row][col] = 0.0f;
-
-        // Load weight tile W (for all 4 output elements)
-        int tiledRow_W = t * QKV_TS + row;
-        int N_total = 3 * N;
-
-        // W is stored as [3*N, K] in row-major
-        // We need to load transposed for computation
-        if (globalCol < N_total && tiledRow_W < K_dim)
-            Wsub[col][row] = W[globalCol * K_dim + tiledRow_W];
-        else
-            Wsub[col][row] = 0.0f;
-
-        barrier(CLK_LOCAL_MEM_FENCE);
-
-        // Compute
-        for (int k = 0; k < QKV_TS; k++) {
-            float valA = Asub[row][k];
-            float valW = Wsub[col][k];
-            acc.x += valA * valW;
-        }
-
-        // Load next 3 columns for float4
-        if ((globalCol + 1) < N_total && tiledRow_W < K_dim)
-            Wsub[col][row] = W[(globalCol + 1) * K_dim + tiledRow_W];
-        else
-            Wsub[col][row] = 0.0f;
-        barrier(CLK_LOCAL_MEM_FENCE);
-        for (int k = 0; k < QKV_TS; k++)
-            acc.y += Asub[row][k] * Wsub[col][k];
-
-        if ((globalCol + 2) < N_total && tiledRow_W < K_dim)
-            Wsub[col][row] = W[(globalCol + 2) * K_dim + tiledRow_W];
-        else
-            Wsub[col][row] = 0.0f;
-        barrier(CLK_LOCAL_MEM_FENCE);
-        for (int k = 0; k < QKV_TS; k++)
-            acc.z += Asub[row][k] * Wsub[col][k];
-
-        if ((globalCol + 3) < N_total && tiledRow_W < K_dim)
-            Wsub[col][row] = W[(globalCol + 3) * K_dim + tiledRow_W];
-        else
-            Wsub[col][row] = 0.0f;
-        barrier(CLK_LOCAL_MEM_FENCE);
-        for (int k = 0; k < QKV_TS; k++)
-            acc.w += Asub[row][k] * Wsub[col][k];
-
-        barrier(CLK_LOCAL_MEM_FENCE);
-    }
-
-    // Add bias and write to appropriate output buffer
-    if (globalRow < M && globalCol < (3 * N)) {
-        float4 b_val = (float4)(bias[globalCol+0], bias[globalCol+1], bias[globalCol+2], bias[globalCol+3]);
-        float4 result = acc + b_val;
-
-        if (globalCol < N) {
-            // Q region
-            *(__global float4*)&q_out[globalRow * N + globalCol] = result;
-        } else if (globalCol < 2 * N) {
-            // K region
-            int offset = globalCol - N;
-            *(__global float4*)&k_out[globalRow * N + offset] = result;
-        } else {
-            // V region
-            int offset = globalCol - 2 * N;
-            *(__global float4*)&v_out[globalRow * N + offset] = result;
-        }
-    }
-}
-*/
-
-#define TS 32
-#define WPT 4
-#define RTS (TS / WPT) // 8
-
-__kernel void linear_register_blocked_4x4(
-    int M, int N, int K,
-    __global const float* A,
-    __global const float* B,
-    __global const float* bias,
-    __global float* C,
-    int weight_offset)
-{
-    // Thread IDs
-    const int row = get_local_id(1); // 0..7
-    const int col = get_local_id(0); // 0..7
-    const int globalRow = (get_group_id(1) * TS) + row; // Row start for this thread
-    const int globalCol = (get_group_id(0) * TS) + col; // Col start for this thread
-
-    // Local Memory (Shared Memory)
-    __local float Asub[TS][TS];
-    __local float Bsub[TS][TS];
-
-    // Registers (Accumulators for 4x4 output)
-    float acc[WPT][WPT];
-    for (int w = 0; w < WPT; w++) {
-        for (int r = 0; r < WPT; r++) {
-            acc[w][r] = 0.0f;
-        }
-    }
-
-    // Loop over all tiles
-    const int numTiles = K / TS;
-    for (int t = 0; t < numTiles; t++) {
-        
-        // ---------------------------------------------------------
-        // 1. Cooperative Loading (Global -> Local)
-        // ---------------------------------------------------------
-        // 64 threads need to load 32x32 (1024) elements.
-        // Each thread loads 1024 / 64 = 16 elements.
-        // Unrolled for performance.
-        
-        const int tiledK = t * TS;
-
-        #pragma unroll
-        for (int l = 0; l < WPT; l++) {
-             // Load A: [TS, TS] tile
-             int r_A = row + l * RTS; // row + 0, row + 8, row + 16, row + 24
-             int c_A = col;           // Stride access might be bad here but keeps logic simple
-             // Optimized loading pattern can be used, but let's stick to correctness first
-             // Ideally we load float4, but standard load loop is safer for dimensions
-             
-             // Actual Load A
-             // We need to cover [row*RTS .. row*RTS + WPT] ? No.
-             // We use (row, col) as ID to cover the whole TSxTS block
-             
-             // Simple Tiled Loading:
-             // Thread (row, col) loads Asub[row][col] ... No, 64 threads vs 1024 elements.
-             // We use (row*8 + col) as linear ID
-             int tid = row * RTS + col;
-             int r_tile = tid / TS; // 0..31
-             int c_tile = tid % TS; // 0..31
-             
-             // But we need each thread to load 16 elements?
-             // Let's use the explicit loop defined by WPT
-             
-             int tiled_r = row + l * RTS;
-             int tiled_c = col; // Strided load for coalescing? Let's load 4x float4
-             
-             // Let's map 8x8 threads to load 32x32 tile
-             // Each thread loads 4 float4s?
-             // A: [M, K], B: [N, K]
-        }
-        
-        // --- Simplified Loading Strategy (Standard) ---
-        // Each thread loads 4 floats for A and 4 floats for B
-        #pragma unroll
-        for (int w = 0; w < WPT; w++) {
-            // Load A [32, 32]
-            // We want A[globalRow + w*RTS][tiledK + col] ? No.
-            
-            // Just use linear tiling for loading
-            int tid = row * RTS + col; // 0..63
-            // We need to load 1024 elements. 64 threads. 16 elements per thread.
-            // 16 elements = 4 x float4.
-            
-            int id_per_thread = w * 64 + tid;
-            int r_idx = id_per_thread / TS;
-            int c_idx = id_per_thread % TS;
-            
-            // Load A
-            int g_r = (get_group_id(1) * TS) + r_idx;
-            int g_c = tiledK + c_idx;
-            if(g_r < M && g_c < K) Asub[r_idx][c_idx] = A[g_r * K + g_c];
-            else                   Asub[r_idx][c_idx] = 0.0f;
-            
-            // Load B
-            // B is [N, K]. We load B[N_row][K_col]
-            int g_n = (get_group_id(0) * TS) + r_idx;
-            int g_k = tiledK + c_idx;
-            if((g_n + weight_offset) < (N + weight_offset) && g_k < K) 
-                Bsub[r_idx][c_idx] = B[(g_n + weight_offset) * K + g_k];
-            else 
-                Bsub[r_idx][c_idx] = 0.0f;
-        }
-        
-        barrier(CLK_LOCAL_MEM_FENCE);
-
-        // ---------------------------------------------------------
-        // 2. Compute (Outer Product in Registers)
-        // ---------------------------------------------------------
-        #pragma unroll
-        for (int k = 0; k < TS; k++) {
-            // Cache values from shared memory to registers
-            float regA[WPT];
-            float regB[WPT];
-            
-            for (int w = 0; w < WPT; w++) {
-                regA[w] = Asub[col + w * RTS][k]; // Transposed access for A? No, Row-Major
-                // My loading logic was linear.
-                // Let's correct compute mapping:
-                // Thread (row, col) computes C[globalRow + row][globalCol + col] ? No.
-                // Thread computes C[... + row*RTS][... + col*RTS] ??
-                
-                // Correct Mapping:
-                // Thread(row, col) corresponds to:
-                // C rows: (get_group_id(1)*TS) + row + w*RTS
-                // C cols: (get_group_id(0)*TS) + col + w*RTS
-                 regA[w] = Asub[row + w * RTS][k];
-                 regB[w] = Bsub[col + w * RTS][k];
-            }
-            
-            // Compute
-            for (int wa = 0; wa < WPT; wa++) {
-                for (int wb = 0; wb < WPT; wb++) {
-                    acc[wa][wb] += regA[wa] * regB[wb];
-                }
-            }
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
-    }
-
-    // ---------------------------------------------------------
-    // 3. Store Results
-    // ---------------------------------------------------------
-    for (int w = 0; w < WPT; w++) {
-        for (int r = 0; r < WPT; r++) {
-            int g_r = (get_group_id(1) * TS) + row + w * RTS;
-            int g_c = (get_group_id(0) * TS) + col + r * RTS;
-            
-            if (g_r < M && g_c < N) {
-                C[g_r * N + g_c] = acc[w][r] + bias[g_c + weight_offset];
-            }
-        }
-    }
-}
-
-// 9. GELU
-__kernel void gelu_kernel(__global float* data, int total) {
-    int idx = get_global_id(0);
-    if (idx < total) {
-        float x = data[idx];
-        float val = 0.5f * x * (1.0f + erf(x * 0.70710678118f));
-        
-        data[idx] = val;
-    }
-}
-
-// 10. Prepare Input
-__kernel void prepare_class_pos_kernel(
-    __global float* flat_in, __global float* enc_in,
-    __global float* cls_tok, __global float* pos_emb,
-    int batch_size, int embed_dim, int num_patches)
-{
-    int b = get_global_id(0);
-    int t = get_global_id(1);
-    int e = get_global_id(2);
-    if (b >= batch_size || t > num_patches || e >= embed_dim) return;
-
-    float val = (t == 0) ? cls_tok[e] : flat_in[b * num_patches * embed_dim + (t - 1) * embed_dim + e];
-    enc_in[b * (num_patches + 1) * embed_dim + t * embed_dim + e] = val + pos_emb[t * embed_dim + e];
-}
-
-
-__kernel void extract_cls_softmax_kernel(
-    __global float* src_logits, __global float* output_probs,
-    int num_classes, int seq_len) 
-{
-    int b = get_global_id(0);
-    int offset = b * seq_len * num_classes; 
-    float max_val = -1e30f;
-    for (int i = 0; i < num_classes; ++i) max_val = fmax(max_val, src_logits[offset + i]);
-    float sum = 0.0f;
-    for (int i = 0; i < num_classes; ++i) {
-        float val = exp(src_logits[offset + i] - max_val);
-        output_probs[b * num_classes + i] = val; 
-        sum += val;
-    }
-    float inv_sum = 1.0f / sum;
-    for (int i = 0; i < num_classes; ++i) output_probs[b * num_classes + i] *= inv_sum;
 }

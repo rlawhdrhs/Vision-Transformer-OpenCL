@@ -16,5 +16,5 @@
 #include <time.h>
 
 void ViT_opencl(ImageData *image, Network *networks, float **prb);
-char *get_source_code(const char *file_name, size_t *len);
+char *get_source_code(const char *file_name, size_t * len);
 #endif#pragma once

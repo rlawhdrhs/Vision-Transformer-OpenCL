@@ -70,7 +70,6 @@ void flatten_transpose(float* input, float* output) {
 }
 
 void class_token(float* patch_tokens, float* final_tokens, Network cls_tk) {
-    // 이미지의 패치 수 계산: output_size = img_size / patch_size, num_patches = output_size^2
     int output_size = img_size / patch_size;
     int num_patches = output_size * output_size;
 
@@ -279,10 +278,8 @@ void Encoder(float* input, float* output,
     float* residual = (float*)malloc(sizeof(float) * tokens * embed_dim);
     float* ln2_out = (float*)malloc(sizeof(float) * tokens * embed_dim);
     float* mlp_out = (float*)malloc(sizeof(float) * tokens * embed_dim);
-
     /*LN1*/
     layer_norm(input, ln1_out, ln1_w, ln1_b);
-
     /*Attn*/
     multihead_attn(ln1_out, attn_out, attn_w, attn_b, attn_out_w, attn_out_b);
 
