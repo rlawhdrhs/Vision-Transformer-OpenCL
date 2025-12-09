@@ -16,7 +16,7 @@
 #define embed_dim 768
 #define num_heads 12
 #define mlp_ratio 4.0
-#define BATCH_SIZE_DEFAULT 16
+#define BATCH_SIZE_DEFAULT 32
 #define MAX_PROFILE_KERNELS 32
 #define TS 32
 
@@ -179,7 +179,7 @@ void initialize_opencl() {
     g_opencl.k_res = clCreateKernel(g_opencl.program, "add_residual_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_soft = clCreateKernel(g_opencl.program, "softmax_reduction_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_gelu = clCreateKernel(g_opencl.program, "gelu_kernel", &err); CHECK_ERROR(err);
-    g_opencl.k_lin = clCreateKernel(g_opencl.program, "linear_kernel_opt", &err); CHECK_ERROR(err);
+    g_opencl.k_lin = clCreateKernel(g_opencl.program, "linear_fused_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_bias = clCreateKernel(g_opencl.program, "add_bias_broadcast_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_score = clCreateKernel(g_opencl.program, "mha_score_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_mha_soft = clCreateKernel(g_opencl.program, "mha_softmax_kernel", &err); CHECK_ERROR(err);
@@ -364,11 +364,37 @@ void run_layernorm(cl_command_queue queue, cl_mem in, cl_mem out, int w_idx, int
 #endif
 }
 
-void run_linear(cl_command_queue queue, cl_mem in, cl_mem out, int w_idx, int b_idx, int tokens, int in_f, int out_f, int offset) {
+//void run_linear(cl_command_queue queue, cl_mem in, cl_mem out, int w_idx, int b_idx, int tokens, int in_f, int out_f, int offset) {
+//    int WPT = 4;
+//    size_t global_col = ((out_f + TS - 1) / TS) * (TS / WPT);
+//    size_t global_row = ((tokens + TS - 1) / TS) * TS;
+//
+//    size_t global[2] = { global_col, global_row };
+//    size_t local[2] = { TS / WPT, TS };
+//
+//    clSetKernelArg(g_opencl.k_lin, 0, sizeof(int), &tokens);
+//    clSetKernelArg(g_opencl.k_lin, 1, sizeof(int), &out_f);
+//    clSetKernelArg(g_opencl.k_lin, 2, sizeof(int), &in_f);
+//    clSetKernelArg(g_opencl.k_lin, 3, sizeof(cl_mem), &in);
+//    clSetKernelArg(g_opencl.k_lin, 4, sizeof(cl_mem), &g_weight_buffers[w_idx]);
+//    clSetKernelArg(g_opencl.k_lin, 5, sizeof(cl_mem), &g_weight_buffers[b_idx]);
+//    clSetKernelArg(g_opencl.k_lin, 6, sizeof(cl_mem), &out);
+//    clSetKernelArg(g_opencl.k_lin, 7, sizeof(int), &offset);
+//
+//#if ENABLE_PROFILING
+//    cl_event event;
+//    clEnqueueNDRangeKernel(queue, g_opencl.k_lin, 2, NULL, global, local, 0, NULL, &event);
+//    register_kernel_time("Linear", event);
+//    clReleaseEvent(event);
+//#else
+//    clEnqueueNDRangeKernel(queue, g_opencl.k_lin, 2, NULL, global, local, 0, NULL, NULL);
+//#endif
+//}
+
+void run_linear(cl_command_queue queue, cl_mem in, cl_mem out, int w_idx, int b_idx, int tokens, int in_f, int out_f, int offset, int use_gelu) {
     int WPT = 4;
     size_t global_col = ((out_f + TS - 1) / TS) * (TS / WPT);
     size_t global_row = ((tokens + TS - 1) / TS) * TS;
-
     size_t global[2] = { global_col, global_row };
     size_t local[2] = { TS / WPT, TS };
 
@@ -380,6 +406,8 @@ void run_linear(cl_command_queue queue, cl_mem in, cl_mem out, int w_idx, int b_
     clSetKernelArg(g_opencl.k_lin, 5, sizeof(cl_mem), &g_weight_buffers[b_idx]);
     clSetKernelArg(g_opencl.k_lin, 6, sizeof(cl_mem), &out);
     clSetKernelArg(g_opencl.k_lin, 7, sizeof(int), &offset);
+
+    clSetKernelArg(g_opencl.k_lin, 8, sizeof(int), &use_gelu);
 
 #if ENABLE_PROFILING
     cl_event event;
@@ -430,9 +458,9 @@ void MHA_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
     float scale = 1.0f / sqrtf((float)head_dim);
 
     // Q, K, V 행렬 생성
-    run_linear(queue, in, pool->q_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 0);
-    run_linear(queue, in, pool->k_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, embed_dim);
-    run_linear(queue, in, pool->v_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 2 * embed_dim);
+    run_linear(queue, in, pool->q_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 0, 0);
+    run_linear(queue, in, pool->k_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, embed_dim, 0);
+    run_linear(queue, in, pool->v_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 2 * embed_dim, 0);
 
     size_t score_global[3] = {
         (size_t)((tokens + TS - 1) / TS * TS),
@@ -495,7 +523,7 @@ void MHA_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
 #endif
 
     // 선형 변환
-    run_linear(queue, pool->attn_out_linear, out, out_w_idx, out_b_idx, total_tokens, embed_dim, embed_dim, 0);
+    run_linear(queue, pool->attn_out_linear, out, out_w_idx, out_b_idx, total_tokens, embed_dim, embed_dim, 0, 0);
 }
 
 void MLP_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_mem out, int w1, int b1, int w2, int b2, int batch_size) {
@@ -503,9 +531,9 @@ void MLP_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
     int total = tokens * batch_size;
     int hidden = (int)(embed_dim * mlp_ratio);
 
-    run_linear(queue, in, pool->mlp_fc1_out, w1, b1, total, embed_dim, hidden, 0);
-    run_gelu(queue, pool->mlp_fc1_out, total * hidden);
-    run_linear(queue, pool->mlp_fc1_out, out, w2, b2, total, hidden, embed_dim, 0);
+    run_linear(queue, in, pool->mlp_fc1_out, w1, b1, total, embed_dim, hidden, 0, 1);
+    //run_gelu(queue, pool->mlp_fc1_out, total * hidden);
+    run_linear(queue, pool->mlp_fc1_out, out, w2, b2, total, hidden, embed_dim, 0, 0);
 }
 
 void Encoder_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_mem out, int *net_indices, int batch_size) {
@@ -603,7 +631,7 @@ void ViT_opencl(ImageData *image, Network *networks, float **probabilities) {
 
             // Head
             run_layernorm(Q, in_buf, P->enc_out, 148, 149, ((img_size / patch_size) * (img_size / patch_size) + 1) * current_batch);
-            run_linear(Q, P->enc_out, P->logit_buf, 150, 151, ((img_size / patch_size) * (img_size / patch_size) + 1) * current_batch, embed_dim, num_classes, 0);
+            run_linear(Q, P->enc_out, P->logit_buf, 150, 151, ((img_size / patch_size) * (img_size / patch_size) + 1) * current_batch, embed_dim, num_classes, 0, 0);
 
             // Softmax
             size_t soft_global = current_batch;
