@@ -1,4 +1,10 @@
-#define TS 16
+#define PATCH_SIZE 16
+#define IN_CHANS 3
+#define EMBED_DIM 768
+#define IMG_SIZE 224
+#define OUT_SIZE (IMG_SIZE / PATCH_SIZE) 
+#define TS 32
+
 
 // 1. Bias Broadcast
 __kernel void add_bias_broadcast_kernel(
@@ -61,6 +67,7 @@ __kernel void layer_norm_kernel(
 }
 
 // 3. Conv2d Batched
+/*
 __kernel void Conv2d_Batched_Kernel(
     __global float* input, __global float* output,
     __global float* weight, __global float* bias,
@@ -93,6 +100,45 @@ __kernel void Conv2d_Batched_Kernel(
     }
     output[out_batch_off + (oc * output_size + oh) * output_size + ow] = sum;
 }
+*/
+
+__kernel void Conv2d_Batched_Kernel(
+    __global float* input, __global float* output,
+    __global float* weight, __global float* bias
+) 
+{
+    int oc = get_global_id(0);
+    int oh = get_global_id(1);
+    int global_z = get_global_id(2);
+
+    int batch_idx = global_z / OUT_SIZE;
+    int ow = global_z % OUT_SIZE;
+
+    if (oc >= EMBED_DIM || oh >= OUT_SIZE) return;
+
+    int in_batch_off = batch_idx * IN_CHANS * IMG_SIZE * IMG_SIZE;
+    int out_batch_off = batch_idx * EMBED_DIM * OUT_SIZE * OUT_SIZE;
+    
+    float sum = bias[oc];
+    int w_oc_off = oc * IN_CHANS * PATCH_SIZE * PATCH_SIZE;
+
+    for (int ic = 0; ic < IN_CHANS; ++ic) { 
+        
+        int in_ic_off = in_batch_off + ic * IMG_SIZE * IMG_SIZE;
+        int w_ic_off = w_oc_off + ic * PATCH_SIZE * PATCH_SIZE;
+        
+        for (int kh = 0; kh < PATCH_SIZE; ++kh) {
+            int in_ih_off = in_ic_off + (oh * PATCH_SIZE + kh) * IMG_SIZE;
+            int w_kh_off = w_ic_off + kh * PATCH_SIZE;
+            
+            for (int kw = 0; kw < PATCH_SIZE; ++kw) {
+                sum += input[in_ih_off + ow * PATCH_SIZE + kw] * weight[w_kh_off + kw];
+            }
+        }
+    }
+    output[out_batch_off + (oc * OUT_SIZE + oh) * OUT_SIZE + ow] = sum;
+}
+
 
 // 4. Flatten Batched
 __kernel void FlattenTranspose_Batched_Kernel(
@@ -147,13 +193,9 @@ __kernel void MHA_gemm_kernel(
 
         // Load B [Col, Inner] (if TransB)
         if (transB) {
-            // B is [K, N] logically for us (Weight[Out, In])
-            // We want B^T. Kernel expects B to be stored such that we read Row gi, Col tj?
-            // Correct mapping: B[gi * B_stride + tj] accesses Weight[OutFeat, InnerDim]
             if (gi < K && tj < N) Bsub[j][i] = B[B_off + gi * B_stride + tj];
             else Bsub[j][i] = 0.0f;
         } else {
-            // Standard Mul: B[Inner, Col]
             if (tj < N && gi < K) Bsub[j][i] = B[B_off + tj * B_stride + gi];
             else Bsub[j][i] = 0.0f;
         }
@@ -366,7 +408,7 @@ __kernel void softmax_reduction_kernel(__global float* scores, int tokens, int o
     for (int i = lid; i < tokens; i += 256) scores[row_off + i] *= inv_sum;
 }
 
-// 8. Linear (Dense)
+// 8. Linear
 __kernel void linear_kernel(
     int M, int N, int K,
     __global const float* A,
@@ -394,7 +436,6 @@ __kernel void linear_kernel(
     for (int t = 0; t < numTiles; t++) {
         const int tiledCol = t * TS + col * 4;
         
-        #pragma unroll
         for (int i = 0; i < 4; i++) {
              int c = tiledCol + i;
              if (globalRow < M && c < K)
@@ -402,7 +443,6 @@ __kernel void linear_kernel(
              else
                  Asub[row][col * 4 + i] = 0.0f;
         }
-        #pragma unroll
         for (int i = 0; i < 4; i++) {
             int w_row = globalCol + i + weight_offset; // Output Ch
             int w_col = t * TS + row;                  // Input Ch (K)
@@ -435,6 +475,112 @@ __kernel void linear_kernel(
         b_val.w = bias[globalCol + 3 + weight_offset];
         
         __global float4* C_ptr = (__global float4*)&C[globalRow * N + globalCol];
+        *C_ptr = acc + b_val;
+    }
+}
+
+__kernel __attribute__((reqd_work_group_size(TS / 4, TS, 1)))
+__attribute__((vec_type_hint(float4)))
+void linear_kernel_opt(
+    int M, int N, int K,
+    __global const float* A,
+    __global const float* B,
+    __global const float* bias,
+    __global float* C,
+    int weight_offset) 
+{
+    // Thread ID
+    const int local_col = get_local_id(0);
+    const int local_row = get_local_id(1);
+    const int group_col = get_group_id(0);
+    const int group_row = get_group_id(1);
+
+    // Global Output Coordinate
+    const int col = (group_col * TS) + (local_col * 4);
+    const int row = (group_row * TS) + local_row;
+
+    // Local Memory
+    __local float Asub[TS][TS + 1];
+    __local float Bsub[TS][TS + 1];
+
+    float4 acc = (float4)(0.0f);
+
+    // Loop over tiles
+    const int numTiles = (K + TS - 1) / TS;
+    
+    const int local_idx = local_row * (TS/4) + local_col; // 0 .. 255
+    
+    for (int t = 0; t < numTiles; t++) {
+        const int tiledK = t * TS;
+
+        // 1. Load A [Row, K]
+        for(int i=0; i<4; i++) {
+             int tiled_k_idx = t*TS + local_col*4 + i;
+        }
+
+        // --- B 행렬 로딩 ---
+        
+        for (int i = 0; i < 4; i++) {
+            // 로드할 B 내부 좌표 (tr, tc)
+            int flat_idx = local_idx * 4 + i;
+            int tr = flat_idx / TS;
+            int tc = flat_idx % TS;
+            
+            int global_b_row = (group_col * TS) + tr + weight_offset;
+            int global_b_col = tiledK + tc;
+
+            float val = 0.0f;
+            if (global_b_row < (N + weight_offset) && global_b_col < K) {
+                val = B[global_b_row * K + global_b_col];
+            }
+            
+            Bsub[tc][tr] = val; 
+        }
+
+        // A 로딩
+        for (int i = 0; i < 4; i++) {
+            int flat_idx = local_idx * 4 + i;
+            int tr = flat_idx / TS;
+            int tc = flat_idx % TS;
+            
+            int global_a_row = (group_row * TS) + tr;
+            int global_a_col = tiledK + tc;
+            
+            float val = 0.0f;
+            if (global_a_row < M && global_a_col < K) {
+                val = A[global_a_row * K + global_a_col];
+            }
+            Asub[tr][tc] = val;
+        }
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int k = 0; k < TS; k++) {
+            float valA = Asub[local_row][k];
+            float4 valB;
+            valB.x = Bsub[k][local_col * 4 + 0];
+            valB.y = Bsub[k][local_col * 4 + 1];
+            valB.z = Bsub[k][local_col * 4 + 2];
+            valB.w = Bsub[k][local_col * 4 + 3];
+
+            acc += valA * valB;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    // Store Result
+    if (row < M && col < N) {
+        // Bias Loading
+        float4 b_val = (float4)(0.0f);
+        if (col + 3 < N) { // Boundary check safe logic required ideally
+             b_val.x = bias[col + 0 + weight_offset];
+             b_val.y = bias[col + 1 + weight_offset];
+             b_val.z = bias[col + 2 + weight_offset];
+             b_val.w = bias[col + 3 + weight_offset];
+        }
+        
+        // Vector store
+        __global float4* C_ptr = (__global float4*)&C[row * N + col];
         *C_ptr = acc + b_val;
     }
 }
