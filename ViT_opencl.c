@@ -91,7 +91,7 @@ void initialize_opencl() {
     g_opencl.program = clCreateProgramWithSource(g_opencl.context, 1, (const char **)&kernel_source, &kernel_source_size, &err);
     CHECK_ERROR(err)
 
-    err = clBuildProgram(g_opencl.program, 1, &g_opencl.device, NULL, NULL, NULL);
+        err = clBuildProgram(g_opencl.program, 1, &g_opencl.device, NULL, NULL, NULL);
     build_error(g_opencl.program, g_opencl.device, err);
     CHECK_ERROR(err);
 
@@ -130,12 +130,11 @@ void Conv2d_opencl(float *input, float *output, Network weight, Network bias) {
     const size_t output_size_bytes = (size_t)embed_dim * output_size * output_size * sizeof(float);
 
     // --- 0. 메모리 버퍼 생성 ---
-    cl_mem input_buf = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, 
-                                      input_size, input, &err);
+    cl_mem input_buf = clCreateBuffer(g_opencl.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, input_size, input, &err);
     CHECK_ERROR(err);
-    
-    cl_mem weight_buf = create_weight_buffer(&weight); 
-    cl_mem bias_buf = create_weight_buffer(&bias); 
+
+    cl_mem weight_buf = create_weight_buffer(&weight);
+    cl_mem bias_buf = create_weight_buffer(&bias);
 
     // 최종 결과 버퍼
     cl_mem output_buf = clCreateBuffer(g_opencl.context, CL_MEM_WRITE_ONLY, output_size_bytes, NULL, &err);
@@ -466,7 +465,7 @@ void linear_layer_opencl(float *input, float *output, int tokens, int in_feature
     CHECK_ERROR(err);
 
     cl_mem d_output = clCreateBuffer(g_opencl.context, CL_MEM_WRITE_ONLY, size_output, NULL, &err);
-    CHECK_ERROR(err); 
+    CHECK_ERROR(err);
 
     err = clSetKernelArg(kernel, 0, sizeof(int), &tokens);
     CHECK_ERROR(err);
@@ -516,7 +515,7 @@ void multihead_attn_opencl(float *input, float *output,
 
     time_t start, end;
     start = clock();
-    calculate_qkv_opencl(input, in_weight, in_bias, Q, K, V, tokens); 
+    calculate_qkv_opencl(input, in_weight, in_bias, Q, K, V, tokens);
     end = clock();
     //printf("Opencl QKV time: %f sec\n", (double)(end - start) / CLK_TCK);
 
@@ -605,7 +604,7 @@ void multihead_attn_opencl(float *input, float *output,
 
 
 // MLP 블록(OpenCL+CPU) 시간 측정 포함 버전(류태우)
-void mlp_block_opencl(float* input, float* output,
+void mlp_block_opencl(float *input, float *output,
     Network fc1_weight, Network fc1_bias,
     Network fc2_weight, Network fc2_bias)
 {
@@ -740,19 +739,20 @@ void Encoder_opencl(float *input, float *output,
     float *ln2_out = (float *)malloc(sizeof(float) * tokens * embed_dim);
     float *mlp_out = (float *)malloc(sizeof(float) * tokens * embed_dim);
 
-    time_t start, end;
+    time_t start, end, ms;
 
     /*LN1*/
     start = clock();
     layer_norm_opencl(input, ln1_out, ln1_w, ln1_b);
     end = clock();
-    //printf("Opencl 정규화 time: %f sec\n", (double)(end - start) / CLK_TCK);
+    ms = (double)(end - start) * 1e-6;
+    printf("Opencl 정규화 time: %f sec\n", (double)(end - start) / CLK_TCK);
 
     /*Attn*/
     start = clock();
     multihead_attn_opencl(ln1_out, attn_out, attn_w, attn_b, attn_out_w, attn_out_b);
     end = clock();
-    //printf("Opencl MHA time: %f sec\n", (double)(end - start) / CLK_TCK);
+    printf("Opencl MHA time: %f sec\n", (double)(end - start) / CLK_TCK);
 
     /*Residual1*/
     for (int i = 0; i < tokens * embed_dim; i++) {
@@ -763,12 +763,12 @@ void Encoder_opencl(float *input, float *output,
     start = clock();
     layer_norm_opencl(residual, ln2_out, ln2_w, ln2_b);
     end = clock();
-    //printf("Opencl 정규화 time: %f sec\n", (double)(end - start) / CLK_TCK);
+    printf("Opencl 정규화 time: %f sec\n", (double)(end - start) / CLK_TCK);
     /*MLP*/
     start = clock();
     mlp_block_opencl(ln2_out, mlp_out, mlp1_w, mlp1_b, mlp2_w, mlp2_b);
     end = clock();
-    //printf("Opencl MLP time: %f sec\n", (double)(end - start) / CLK_TCK);
+    printf("Opencl MLP time: %f sec\n", (double)(end - start) / CLK_TCK);
 
     /*Residual2*/
     start = clock();
@@ -776,7 +776,7 @@ void Encoder_opencl(float *input, float *output,
         output[i] = residual[i] + mlp_out[i];
     }
     end = clock();
-    //printf("Opencl Residual time: %f sec\n", (double)(end - start) / CLK_TCK);
+    printf("Opencl Residual time: %f sec\n", (double)(end - start) / CLK_TCK);
 
     free(ln1_out); free(attn_out); free(residual); free(ln2_out); free(mlp_out);
 }
