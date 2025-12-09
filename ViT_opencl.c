@@ -33,7 +33,7 @@ typedef struct {
     cl_context context;
     cl_command_queue queues[2]; // Double Buffering�� ���� 2���� ť
     cl_program program;
-    cl_kernel k_conv, k_flat, k_prep, k_ln, k_gemm, k_res, k_soft, k_gelu, k_lin, k_bias, k_score, k_mha_soft, k_context, k_cls_soft;
+    cl_kernel k_conv, k_flat, k_prep, k_ln, k_gemm, k_res, k_soft, k_gelu, k_lin, k_bias, k_score, k_mha_soft, k_context, k_cls_soft, k_qkv_fused;
     cl_device_id device;
 } OpenCL_Resources;
 
@@ -205,6 +205,7 @@ void initialize_opencl() {
     g_opencl.k_mha_soft = clCreateKernel(g_opencl.program, "mha_softmax_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_context = clCreateKernel(g_opencl.program, "mha_context_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_cls_soft = clCreateKernel(g_opencl.program, "extract_cls_softmax_kernel", &err); CHECK_ERROR(err);
+    g_opencl.k_qkv_fused = clCreateKernel(g_opencl.program, "linear_qkv_fused_float4", &err); CHECK_ERROR(err);
 }
 
 // �ε����� �޾� �ش� Ǯ�� �ʱ�ȭ
@@ -285,6 +286,7 @@ void release_resources() {
     clReleaseKernel(g_opencl.k_lin); clReleaseKernel(g_opencl.k_bias);
     clReleaseKernel(g_opencl.k_score); clReleaseKernel(g_opencl.k_mha_soft);
     clReleaseKernel(g_opencl.k_context); clReleaseKernel(g_opencl.k_cls_soft);
+    clReleaseKernel(g_opencl.k_qkv_fused);
     clReleaseProgram(g_opencl.program);
 
     // 4. Queue �� Context ����
@@ -449,10 +451,32 @@ void MHA_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
     int head_dim = embed_dim / num_heads;
     float scale = 1.0f / sqrtf((float)head_dim);
 
-    // Q, K, V ��� ����
-    run_linear(queue, in, pool->q_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 0);
-    run_linear(queue, in, pool->k_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, embed_dim);
-    run_linear(queue, in, pool->v_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 2 * embed_dim);
+    // Q, K, V ��� ���� (Fused Kernel)
+    int WPT = 4;
+    int ed = embed_dim;
+    size_t qkv_global_col = ((embed_dim + g_tile_size - 1) / g_tile_size) * (g_tile_size / WPT);
+    size_t qkv_global_row = ((total_tokens + g_tile_size - 1) / g_tile_size) * g_tile_size;
+    size_t qkv_global[2] = { qkv_global_col, qkv_global_row };
+    size_t qkv_local[2] = { g_tile_size / WPT, g_tile_size };
+
+    clSetKernelArg(g_opencl.k_qkv_fused, 0, sizeof(int), &total_tokens);
+    clSetKernelArg(g_opencl.k_qkv_fused, 1, sizeof(int), &ed);
+    clSetKernelArg(g_opencl.k_qkv_fused, 2, sizeof(int), &ed);
+    clSetKernelArg(g_opencl.k_qkv_fused, 3, sizeof(cl_mem), &in);
+    clSetKernelArg(g_opencl.k_qkv_fused, 4, sizeof(cl_mem), &g_weight_buffers[w_idx]);
+    clSetKernelArg(g_opencl.k_qkv_fused, 5, sizeof(cl_mem), &g_weight_buffers[b_idx]);
+    clSetKernelArg(g_opencl.k_qkv_fused, 6, sizeof(cl_mem), &pool->q_buf);
+    clSetKernelArg(g_opencl.k_qkv_fused, 7, sizeof(cl_mem), &pool->k_buf);
+    clSetKernelArg(g_opencl.k_qkv_fused, 8, sizeof(cl_mem), &pool->v_buf);
+
+#if ENABLE_PROFILING
+    cl_event e_qkv;
+    clEnqueueNDRangeKernel(queue, g_opencl.k_qkv_fused, 2, NULL, qkv_global, qkv_local, 0, NULL, &e_qkv);
+    register_kernel_time("QKV Fused", e_qkv);
+    clReleaseEvent(e_qkv);
+#else
+    clEnqueueNDRangeKernel(queue, g_opencl.k_qkv_fused, 2, NULL, qkv_global, qkv_local, 0, NULL, NULL);
+#endif
 
     size_t score_global[3] = {
         (size_t)((tokens + g_tile_size - 1) / g_tile_size * g_tile_size),
