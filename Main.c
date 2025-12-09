@@ -43,14 +43,14 @@ int main() {
     }
     printf("=====================Start========================\n");
     //start = clock();
-    //// Input here - º´·ÄÃ³¸® ÇÔ¼ö ÀÛ¼º
+    //// Input here - ë³‘ë ¬ì²˜ë¦¬ í•¨ìˆ˜ ì‘ì„±
     //ViT_seq(images, network, probabilities);
     ////
     //end = clock();
     //printf("Seq time: %f sec\n", (double)(end - start) / CLK_TCK);
 
     start = clock();
-    // Input here - º´·ÄÃ³¸® ÇÔ¼ö ÀÛ¼º
+    // Input here - ë³‘ë ¬ì²˜ë¦¬ í•¨ìˆ˜ ì‘ì„±
     ViT_opencl(images, network, probabilities);
     //
     end = clock();
@@ -71,13 +71,46 @@ int main() {
 
     int cmp = comparator();
     if (cmp == 0) {
-        printf("Comparator: µÎ ÆÄÀÏÀÇ ³»¿ëÀÌ µ¿ÀÏÇÕ´Ï´Ù.\n");
+        printf("Comparator: ë‘ íŒŒì¼ì˜ ë‚´ìš©ì´ ë™ì¼í•©ë‹ˆë‹¤.\n");
     }
     else if (cmp > 0) {
-        printf("Comparator: µÎ ÆÄÀÏÀÇ ³»¿ë¿¡ %d°³ÀÇ Â÷ÀÌ°¡ ÀÖ½À´Ï´Ù.\n", cmp);
+        printf("Comparator: ë‘ íŒŒì¼ì˜ ë‚´ìš©ì— %dê°œì˜ ì°¨ì´ê°€ ìˆìŠµë‹ˆë‹¤.\n", cmp);
     }
     else { 
-        printf("Comparator: ÆÄÀÏ ºñ±³ µµÁß ¿À·ù°¡ ¹ß»ıÇß½À´Ï´Ù.\n");
+        printf("Comparator: íŒŒì¼ ë¹„êµ ë„ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.\n");
     }
     return 0;
-}
+} 
+
+// =====================Start========================
+// Start ViT Pipeline (Total Batches: 7, Overlapping Enabled)
+// Batch 0 Finished (Imgs 0 ~ 16)
+// Batch 1 Finished (Imgs 16 ~ 32)
+// Batch 2 Finished (Imgs 32 ~ 48)
+// Batch 3 Finished (Imgs 48 ~ 64)
+// Batch 4 Finished (Imgs 64 ~ 80)
+// Batch 5 Finished (Imgs 80 ~ 96)
+// Batch 6 Finished (Imgs 96 ~ 100)
+
+// ========================================================================
+//                   OPENCL KERNEL PROFILING RESULTS
+// ========================================================================
+//  Kernel Name          |    Calls | Total Time (ms) | Avg Time (ms)
+// ------------------------------------------------------------------------
+//  Conv2d               |        7 |        191.9996 |     27.42851
+//  flatten              |        7 |          1.2211 |      0.17444
+//  Token, Posemb        |        7 |          1.7097 |      0.24424
+//  layer_norm           |      175 |          6.9052 |      0.03946
+//  Linear               |      511 |       2222.9482 |      4.35019
+//  MHA Score            |       84 |        132.3752 |      1.57589
+//  MHA Softmax          |       84 |        109.7500 |      1.30655
+//  MHA Context          |       84 |        163.2595 |      1.94357
+//  residual             |      168 |          7.8816 |      0.04691
+//  gelu                 |       84 |         20.8762 |      0.24853
+//  Cls Softmax          |        7 |          0.5391 |      0.07702
+// ------------------------------------------------------------------------
+//  TOTAL GPU KERNEL TIME : 2.8595 sec
+// ========================================================================
+
+// Opencl time: 3.140000 sec
+// Comparator: ë‘ íŒŒì¼ì˜ ë‚´ìš©ì´ ë™ì¼í•©ë‹ˆë‹¤.
