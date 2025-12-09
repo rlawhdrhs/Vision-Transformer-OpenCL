@@ -479,129 +479,7 @@ __kernel void linear_kernel(
     }
 }
 
-__kernel __attribute__((reqd_work_group_size(TS / 4, TS, 1)))
-__attribute__((vec_type_hint(float4)))
-void linear_fused_kernel(
-    int M, int N, int K,
-    __global const float* A,
-    __global const float* B,
-    __global const float* bias,
-    __global float* C,
-    int weight_offset,
-    int use_gelu) 
-{
-    // Thread ID
-    const int local_col = get_local_id(0);
-    const int local_row = get_local_id(1);
-    const int group_col = get_group_id(0);
-    const int group_row = get_group_id(1);
-
-    // Global Output Coordinate
-    const int col = (group_col * TS) + (local_col * 4);
-    const int row = (group_row * TS) + local_row;
-
-    // Local Memory
-    __local float Asub[TS][TS + 1];
-    __local float Bsub[TS][TS + 1];
-
-    float4 acc = (float4)(0.0f);
-
-    // Loop over tiles
-    const int numTiles = (K + TS - 1) / TS;
-    
-    // For efficient loading
-    const int local_idx = local_row * (TS/4) + local_col; // 0 .. 255
-    
-    for (int t = 0; t < numTiles; t++) {
-        const int tiledK = t * TS;
-
-        // --- Load B Matrix (Transposed access pattern handling) ---
-        for (int i = 0; i < 4; i++) {
-            // Flattened index to 2D local index
-            int flat_idx = local_idx * 4 + i;
-            int tr = flat_idx / TS;
-            int tc = flat_idx % TS;
-            
-            int global_b_row = (group_col * TS) + tr + weight_offset;
-            int global_b_col = tiledK + tc;
-
-            float val = 0.0f;
-            // Boundary Check
-            if (global_b_row < (N + weight_offset) && global_b_col < K) {
-                val = B[global_b_row * K + global_b_col];
-            }
-            
-            // Transpose storage in Local Mem for faster access
-            Bsub[tc][tr] = val; 
-        }
-
-        // --- Load A Matrix ---
-        for (int i = 0; i < 4; i++) {
-            int flat_idx = local_idx * 4 + i;
-            int tr = flat_idx / TS;
-            int tc = flat_idx % TS;
-            
-            int global_a_row = (group_row * TS) + tr;
-            int global_a_col = tiledK + tc;
-            
-            float val = 0.0f;
-            if (global_a_row < M && global_a_col < K) {
-                val = A[global_a_row * K + global_a_col];
-            }
-            Asub[tr][tc] = val;
-        }
-
-        barrier(CLK_LOCAL_MEM_FENCE);
-
-        // --- Computation ---
-        for (int k = 0; k < TS; k++) {
-            float valA = Asub[local_row][k];
-            float4 valB;
-            valB.x = Bsub[k][local_col * 4 + 0];
-            valB.y = Bsub[k][local_col * 4 + 1];
-            valB.z = Bsub[k][local_col * 4 + 2];
-            valB.w = Bsub[k][local_col * 4 + 3];
-
-            acc += valA * valB;
-        }
-        barrier(CLK_LOCAL_MEM_FENCE);
-    }
-
-    // --- Store Result (Bias + GELU) ---
-    if (row < M && col < N) {
-        // 1. Bias Addition
-        float4 b_val = (float4)(0.0f);
-        if (col + 3 < N) { 
-             b_val.x = bias[col + 0 + weight_offset];
-             b_val.y = bias[col + 1 + weight_offset];
-             b_val.z = bias[col + 2 + weight_offset];
-             b_val.w = bias[col + 3 + weight_offset];
-        } else {
-            // Boundary handling for last few columns
-            if (col + 0 < N) b_val.x = bias[col + 0 + weight_offset];
-            if (col + 1 < N) b_val.y = bias[col + 1 + weight_offset];
-            if (col + 2 < N) b_val.z = bias[col + 2 + weight_offset];
-        }
-        
-        float4 result = acc + b_val;
-
-        // 2. Fused GELU Application
-        if (use_gelu == 1) {
-            // GELU Approximation: 0.5 * x * (1 + erf(x / sqrt(2)))
-            // sqrt(2) approx 1.41421356 -> 1/sqrt(2) approx 0.70710678
-            float4 const_val = (float4)(0.70710678118f);
-            float4 half_val = (float4)(0.5f);
-            float4 one_val = (float4)(1.0f);
-            
-            // OpenCL's erf supports float4 vectors
-            result = half_val * result * (one_val + erf(result * const_val));
-        }
-
-        __global float4* C_ptr = (__global float4*)&C[row * N + col];
-        *C_ptr = result;
-    }
-}
-
+/*
 __kernel __attribute__((reqd_work_group_size(TS / 4, TS, 1)))
 __attribute__((vec_type_hint(float4)))
 void linear_kernel_opt(
@@ -703,6 +581,114 @@ void linear_kernel_opt(
         }
         
         // Vector store
+        __global float4* C_ptr = (__global float4*)&C[row * N + col];
+        *C_ptr = acc + b_val;
+    }
+}
+*/
+__kernel __attribute__((reqd_work_group_size(TS / 4, TS, 1)))
+__attribute__((vec_type_hint(float4)))
+void linear_kernel_opt(
+    int M, int N, int K,
+    __global const float* A,
+    __global const float* B,
+    __global const float* bias,
+    __global float* C,
+    int weight_offset) 
+{
+    // Thread ID
+    const int local_col = get_local_id(0);
+    const int local_row = get_local_id(1);
+    const int group_col = get_group_id(0);
+    const int group_row = get_group_id(1);
+
+    // Global Output Coordinate
+    const int col = (group_col * TS) + (local_col * 4);
+    const int row = (group_row * TS) + local_row;
+
+    // Local Memory (Bank Conflict 방지용 +1 padding)
+    __local float Asub[TS][TS + 1];
+    __local float Bsub[TS][TS + 1];
+
+    float4 acc = (float4)(0.0f);
+
+    // Loop over tiles
+    const int numTiles = (K + TS - 1) / TS;
+
+    const int local_idx = local_row * (TS/4) + local_col; 
+    
+    for (int t = 0; t < numTiles; t++) {
+        const int tiledK = t * TS;
+
+        // --- 1. B 행렬 로딩 (Global -> Local Transposed) ---
+        for (int i = 0; i < 4; i++) {
+            // 로드할 B 내부 좌표 (tr, tc)
+            int flat_idx = local_idx * 4 + i;
+            int tr = flat_idx / TS;
+            int tc = flat_idx % TS;
+            
+            int global_b_row = (group_col * TS) + tr + weight_offset;
+            int global_b_col = tiledK + tc;
+
+            float val = 0.0f;
+            if (global_b_row < (N + weight_offset) && global_b_col < K) {
+                val = B[global_b_row * K + global_b_col];
+            }
+            
+            Bsub[tc][tr] = val; // Transpose Store
+        }
+
+        // --- 2. A 행렬 로딩 (Global -> Local) ---
+        for (int i = 0; i < 4; i++) {
+            int flat_idx = local_idx * 4 + i;
+            int tr = flat_idx / TS;
+            int tc = flat_idx % TS;
+            
+            int global_a_row = (group_row * TS) + tr;
+            int global_a_col = tiledK + tc;
+            
+            float val = 0.0f;
+            if (global_a_row < M && global_a_col < K) {
+                val = A[global_a_row * K + global_a_col];
+            }
+            Asub[tr][tc] = val;
+        }
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // --- 3. Compute ---
+        #pragma unroll
+        for (int k = 0; k < TS; k++) {
+            float valA = Asub[local_row][k];
+            float4 valB;
+            // Bsub는 Transpose되어 있으므로 연속 메모리 접근 (빠름)
+            valB.x = Bsub[k][local_col * 4 + 0];
+            valB.y = Bsub[k][local_col * 4 + 1];
+            valB.z = Bsub[k][local_col * 4 + 2];
+            valB.w = Bsub[k][local_col * 4 + 3];
+
+            acc += valA * valB;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    // --- 4. Store Result (Bias Addition Only) ---
+    if (row < M && col < N) {
+        float4 b_val = (float4)(0.0f);
+        
+        // Bias Boundary Check
+        if (col + 3 < N) {
+             b_val.x = bias[col + 0 + weight_offset];
+             b_val.y = bias[col + 1 + weight_offset];
+             b_val.z = bias[col + 2 + weight_offset];
+             b_val.w = bias[col + 3 + weight_offset];
+        } else {
+             if (col + 0 < N) b_val.x = bias[col + 0 + weight_offset];
+             if (col + 1 < N) b_val.y = bias[col + 1 + weight_offset];
+             if (col + 2 < N) b_val.z = bias[col + 2 + weight_offset];
+        }
+        
+        // GELU 없이 Bias만 더해서 저장
         __global float4* C_ptr = (__global float4*)&C[row * N + col];
         *C_ptr = acc + b_val;
     }
