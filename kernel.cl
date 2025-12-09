@@ -222,14 +222,14 @@ __kernel void mha_score_kernel(
     int local_col = get_local_id(0);
 
     // Local Memory (Shared)
-    __local float Q_tile[TS][TS + 1]; // Bank Conflict ¹æÁö ÆÐµù
+    __local float Q_tile[TS][TS + 1]; // Bank Conflict ï¿½ï¿½ï¿½ï¿½ ï¿½Ðµï¿½
     __local float K_tile[TS][TS + 1];
 
     int batch_idx = batch_head / num_heads;
     int head_idx  = batch_head % num_heads;
-    
-    // Offset °è»ê
-    // Q, K ±¸Á¶: [Batch, Tokens, EmbedDim] (EmbedDim = NumHeads * HeadDim)
+
+    // Offset ï¿½ï¿½ï¿½
+    // Q, K ï¿½ï¿½ï¿½ï¿½: [Batch, Tokens, EmbedDim] (EmbedDim = NumHeads * HeadDim)
     int embed_dim = num_heads * head_dim;
     int base_offset = batch_idx * tokens * embed_dim + head_idx * head_dim;
 
@@ -246,10 +246,10 @@ __kernel void mha_score_kernel(
             Q_tile[local_row][local_col] = 0.0f;
 
         int k_d = tiled_d + local_row; // Transposed loading trick
-        
-        int k_token = col; 
+
+        int k_token = col;
         int k_dim   = tiled_d + local_row; // Loop variable match
-        
+
 
         if (col < tokens && (tiled_d + local_row) < head_dim)
             K_tile[local_col][local_row] = K[base_offset + col * embed_dim + (tiled_d + local_row)];
@@ -259,7 +259,7 @@ __kernel void mha_score_kernel(
         barrier(CLK_LOCAL_MEM_FENCE);
 
         for (int k = 0; k < TS; k++) {
-            sum += Q_tile[local_row][k] * K_tile[local_col][k]; // K´Â À§¿¡¼­ TransposeÇØ¼­ ·ÎµåÇÔ
+            sum += Q_tile[local_row][k] * K_tile[local_col][k]; // Kï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Transposeï¿½Ø¼ï¿½ ï¿½Îµï¿½ï¿½ï¿½
         }
         barrier(CLK_LOCAL_MEM_FENCE);
     }
@@ -271,6 +271,41 @@ __kernel void mha_score_kernel(
     }
 }
 
+// New 3D MHA Score Kernel - simpler indexing
+__kernel void mha_score_kernel_3d(
+    __global float* Q, __global float* K, __global float* scores,
+    int tokens, int head_dim, int num_heads, int batch_size, float scale)
+{
+    int bh = get_global_id(0); // Batch * Heads
+    int i  = get_global_id(1); // Token Q index (Row)
+    int j  = get_global_id(2); // Token K index (Col)
+
+    if (bh >= batch_size * num_heads || i >= tokens || j >= tokens) return;
+
+    int batch_idx = bh / num_heads;
+    int head_idx  = bh % num_heads;
+
+    int embed_dim = num_heads * head_dim;
+    int batch_offset = batch_idx * tokens * embed_dim;
+    int head_offset = head_idx * head_dim;
+
+    // Compute single dot product: Q[i] Â· K[j]
+    float sum = 0.0f;
+    int q_ptr = batch_offset + i * embed_dim + head_offset;
+    int k_ptr = batch_offset + j * embed_dim + head_offset;
+
+    for (int d = 0; d < head_dim; ++d) {
+        sum += Q[q_ptr + d] * K[k_ptr + d];
+    }
+
+    // Score Output: [Batch, Heads, Tokens, Tokens]
+    int score_idx = (batch_idx * num_heads * tokens * tokens) +
+                    (head_idx * tokens * tokens) +
+                    (i * tokens) + j;
+
+    scores[score_idx] = sum * scale;
+}
+
 __kernel void mha_softmax_kernel(__global float* scores, int tokens) {
     int bh = get_global_id(0);
     int i = get_global_id(1); // Row index
@@ -279,7 +314,7 @@ __kernel void mha_softmax_kernel(__global float* scores, int tokens) {
 
     int row_idx = bh * tokens * tokens + i * tokens;
 
-    // 1. Max Ã£±â
+    // 1. Max Ã£ï¿½ï¿½
     float max_val = -1e30f;
     for (int j = 0; j < tokens; j++) {
         max_val = fmax(max_val, scores[row_idx + j]);
@@ -324,7 +359,7 @@ __kernel void mha_context_kernel(
     // Offsets
     int score_base = batch_head * tokens * tokens;
     int v_base = batch_idx * tokens * embed_dim + head_idx * head_dim;
-    int out_base = batch_idx * tokens * embed_dim + head_idx * head_dim; // V¿Í µ¿ÀÏ ±¸Á¶
+    int out_base = batch_idx * tokens * embed_dim + head_idx * head_dim; // Vï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
 
     float sum = 0.0f;
     int num_tiles = (tokens + TS - 1) / TS;
@@ -423,7 +458,7 @@ __kernel void linear_kernel(
     
     // Global Index
     const int globalRow = TS * get_group_id(1) + row; 
-    const int globalCol = TS * get_group_id(0) + (col * 4); // float4 ±âÁØÀÌ¹Ç·Î *4
+    const int globalCol = TS * get_group_id(0) + (col * 4); // float4 ï¿½ï¿½ï¿½ï¿½ï¿½Ì¹Ç·ï¿½ *4
 
     // Local Memory (Padding +1 to avoid bank conflicts)
     __local float Asub[TS][TS + 1];
@@ -487,7 +522,7 @@ void linear_kernel_opt(
     __global const float* B,
     __global const float* bias,
     __global float* C,
-    int weight_offset) 
+    int weight_offset)
 {
     // Thread ID
     const int local_col = get_local_id(0);
@@ -507,9 +542,9 @@ void linear_kernel_opt(
 
     // Loop over tiles
     const int numTiles = (K + TS - 1) / TS;
-    
+
     const int local_idx = local_row * (TS/4) + local_col; // 0 .. 255
-    
+
     for (int t = 0; t < numTiles; t++) {
         const int tiledK = t * TS;
 
@@ -518,14 +553,14 @@ void linear_kernel_opt(
              int tiled_k_idx = t*TS + local_col*4 + i;
         }
 
-        // --- B Çà·Ä ·Îµù ---
-        
+        // --- B ï¿½ï¿½ï¿½ ï¿½Îµï¿½ ---
+
         for (int i = 0; i < 4; i++) {
-            // ·ÎµåÇÒ B ³»ºÎ ÁÂÇ¥ (tr, tc)
+            // ï¿½Îµï¿½ï¿½ï¿½ B ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½Ç¥ (tr, tc)
             int flat_idx = local_idx * 4 + i;
             int tr = flat_idx / TS;
             int tc = flat_idx % TS;
-            
+
             int global_b_row = (group_col * TS) + tr + weight_offset;
             int global_b_col = tiledK + tc;
 
@@ -533,19 +568,19 @@ void linear_kernel_opt(
             if (global_b_row < (N + weight_offset) && global_b_col < K) {
                 val = B[global_b_row * K + global_b_col];
             }
-            
-            Bsub[tc][tr] = val; 
+
+            Bsub[tc][tr] = val;
         }
 
-        // A ·Îµù
+        // A ï¿½Îµï¿½
         for (int i = 0; i < 4; i++) {
             int flat_idx = local_idx * 4 + i;
             int tr = flat_idx / TS;
             int tc = flat_idx % TS;
-            
+
             int global_a_row = (group_row * TS) + tr;
             int global_a_col = tiledK + tc;
-            
+
             float val = 0.0f;
             if (global_a_row < M && global_a_col < K) {
                 val = A[global_a_row * K + global_a_col];
@@ -578,12 +613,13 @@ void linear_kernel_opt(
              b_val.z = bias[col + 2 + weight_offset];
              b_val.w = bias[col + 3 + weight_offset];
         }
-        
+
         // Vector store
         __global float4* C_ptr = (__global float4*)&C[row * N + col];
         *C_ptr = acc + b_val;
     }
 }
+
 // 9. GELU
 __kernel void gelu_kernel(__global float* data, int total) {
     int idx = get_global_id(0);
