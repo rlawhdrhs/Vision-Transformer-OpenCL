@@ -70,6 +70,7 @@ void flatten_transpose(float* input, float* output) {
 }
 
 void class_token(float* patch_tokens, float* final_tokens, Network cls_tk) {
+    // 이미지의 패치 수 계산: output_size = img_size / patch_size, num_patches = output_size^2
     int output_size = img_size / patch_size;
     int num_patches = output_size * output_size;
 
@@ -122,6 +123,7 @@ void layer_norm(float* input, float* output, Network weight, Network bias) {
 
 void multihead_attn(float* input, float* output,
     Network in_weight, Network in_bias, Network out_weight, Network out_bias) {
+
     int head_dim = embed_dim / num_heads, tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1;
    
     /*Allocate Q, K, V : tokens * dim*/
@@ -190,7 +192,6 @@ void multihead_attn(float* input, float* output,
             }
         }
 
-
         // scores와 V를 곱해 head output 계산
         float* head_out = (float*)malloc(sizeof(float) * tokens * head_dim);
         for (int i = 0; i < tokens; i++) {
@@ -213,6 +214,7 @@ void multihead_attn(float* input, float* output,
         free(scores);
         free(head_out);
     }
+
     free(Q); free(K); free(V);
 
     // 최종 선형 프로젝션
@@ -277,8 +279,10 @@ void Encoder(float* input, float* output,
     float* residual = (float*)malloc(sizeof(float) * tokens * embed_dim);
     float* ln2_out = (float*)malloc(sizeof(float) * tokens * embed_dim);
     float* mlp_out = (float*)malloc(sizeof(float) * tokens * embed_dim);
+
     /*LN1*/
     layer_norm(input, ln1_out, ln1_w, ln1_b);
+
     /*Attn*/
     multihead_attn(ln1_out, attn_out, attn_w, attn_b, attn_out_w, attn_out_b);
 
@@ -335,7 +339,7 @@ const int enc_size = embed_dim * ((img_size / patch_size) * (img_size / patch_si
 
 ////////////////////////////////////// Model Architecture //////////////////////////////////////
 void ViT_seq(ImageData* image, Network* networks, float** probabilities) {
-    time_t start, end;
+
     int token_size = ((img_size / patch_size) * (img_size / patch_size) + 1);
     float* layer[4];
     float* enc_layer[12];
@@ -362,13 +366,10 @@ void ViT_seq(ImageData* image, Network* networks, float** probabilities) {
         pos_emb(layer[2], layer[3], networks[3]);
 
         /*Encoder - 12 Layers*/
-        start = clock();
         Encoder(layer[3], enc_layer[0],
             networks[4], networks[5], networks[6], networks[7],
             networks[8], networks[9], networks[10], networks[11],
             networks[12], networks[13], networks[14], networks[15]);
-        end = clock();
-        printf("Seq 인코더 1개층 time: %f sec\n", (double)(end - start) / CLK_TCK);
 
         Encoder(enc_layer[0], enc_layer[1],
             networks[16], networks[17], networks[18], networks[19],
@@ -425,8 +426,8 @@ void ViT_seq(ImageData* image, Network* networks, float** probabilities) {
             networks[140], networks[141], networks[142], networks[143],
             networks[144], networks[145], networks[146], networks[147]);
 
-        start = clock();
         layer_norm(enc_layer[11], enc_output, networks[148], networks[149]);
+
         /* Token 값 추출 */
         float* cls_token = (float*)malloc(sizeof(float) * embed_dim);
         float* cls_output = (float*)malloc(sizeof(float) * num_classes);

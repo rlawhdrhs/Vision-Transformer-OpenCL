@@ -17,7 +17,7 @@ void Encoder(float *input, float *output,
     Network ln1_w, Network ln1_b, Network attn_w, Network attn_b, Network attn_out_w, Network attn_out_b,
     Network ln2_w, Network ln2_b, Network mlp1_w, Network mlp1_b, Network mlp2_w, Network mlp2_b);
 void Softmax(float *logits, float *probabilities, int length);
-void ViT_seq(ImageData* image, Network* networks, float** prb);
+void ViT_seq(ImageData *image, Network *networks, float **prb);
 const int size[];
 const int enc_size;
 
