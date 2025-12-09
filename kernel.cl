@@ -479,85 +479,181 @@ __kernel void linear_kernel(
     }
 }
 
-__kernel __attribute__((reqd_work_group_size(TS / 4, TS, 1)))
+/*
+#define WPT 4
+
+__kernel __attribute__((reqd_work_group_size(TS / 4, TS / WPT, 1)))
 __attribute__((vec_type_hint(float4)))
 void linear_kernel_opt(
     int M, int N, int K,
-    __global const float* A,
-    __global const float* B,
+    __global const float* A, 
+    __global const float* B_transposed, 
     __global const float* bias,
     __global float* C,
     int weight_offset) 
 {
-    // Thread ID
+    const int local_col = get_local_id(0); // 0..7
+    const int local_row = get_local_id(1); // 0..7 (주의! 범위가 줄어듦)
+    
+    const int group_col = get_group_id(0);
+    const int group_row = get_group_id(1);
+    const int globalRowStart = (group_row * TS) + (local_row * WPT);
+    const int globalCol      = (group_col * TS) + (local_col * 4);
+
+    __local float Asub[TS][TS + 4];
+    __local float Bsub[TS][TS + 4];
+
+    float4 acc[WPT]; 
+    #pragma unroll
+    for(int w=0; w<WPT; w++) acc[w] = (float4)(0.0f);
+
+    const int numTiles = (K + TS - 1) / TS;
+
+    for (int t = 0; t < numTiles; t++) {
+        const int tiledK = t * TS;
+        
+        #pragma unroll
+        for(int w=0; w<WPT; w++) {
+            // A 로딩 (A는 Row-major)
+            // local_row * WPT + w : 현재 로딩할 Row (0..31 커버됨)
+            int tiled_r = local_row * WPT + w;
+            int tiled_c = local_col * 4; // float4 단위
+            
+            int global_a_r = (group_row * TS) + tiled_r;
+            int global_a_c = tiledK + tiled_c;
+
+            float4 vecA = (float4)(0.0f);
+            if (global_a_r < M && global_a_c < K) {
+                vecA = *(__global const float4*)&A[global_a_r * K + global_a_c];
+            }
+            Asub[tiled_r][local_col * 4 + 0] = vecA.x;
+            Asub[tiled_r][local_col * 4 + 1] = vecA.y;
+            Asub[tiled_r][local_col * 4 + 2] = vecA.z;
+            Asub[tiled_r][local_col * 4 + 3] = vecA.w;
+            int global_b_r = (group_col * TS) + tiled_r;
+            int global_b_c = tiledK + tiled_c;
+            
+            float4 vecB = (float4)(0.0f);
+            if (global_b_r < (N+weight_offset) && global_b_c < K) {
+                int real_row = global_b_r + weight_offset;
+                vecB = *(__global const float4*)&B_transposed[real_row * K + global_b_c];
+            }
+            Bsub[local_col * 4 + 0][tiled_r] = vecB.x;
+            Bsub[local_col * 4 + 1][tiled_r] = vecB.y;
+            Bsub[local_col * 4 + 2][tiled_r] = vecB.z;
+            Bsub[local_col * 4 + 3][tiled_r] = vecB.w;
+        }
+        
+        barrier(CLK_LOCAL_MEM_FENCE);
+        
+        #pragma unroll
+        for (int k = 0; k < TS; k++) {
+            float4 valB;
+            valB.x = Bsub[k][local_col * 4 + 0];
+            valB.y = Bsub[k][local_col * 4 + 1];
+            valB.z = Bsub[k][local_col * 4 + 2];
+            valB.w = Bsub[k][local_col * 4 + 3];
+
+            // 4개의 Row에 대해 계산
+            #pragma unroll
+            for (int w = 0; w < WPT; w++) {
+                // A값은 Row마다 다르니까 각각 읽음
+                // Asub[local_row * WPT + w][k]
+                float valA = Asub[local_row * WPT + w][k];
+                
+                // FMA (Fused Multiply Add)
+                acc[w] += valA * valB;
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    // 3. Store Result
+    #pragma unroll
+    for (int w = 0; w < WPT; w++) {
+        int r = globalRowStart + w;
+        int c = globalCol;
+
+        if (r < M && c < N) {
+            float4 b_val = (float4)(0.0f);
+            if (c + 3 < N) {
+                 b_val = *(__global const float4*)&bias[c + weight_offset];
+            }
+            __global float4* C_ptr = (__global float4*)&C[r * N + c];
+            *C_ptr = acc[w] + b_val;
+        }
+    }
+}
+*/
+
+__kernel __attribute__((reqd_work_group_size(TS / 4, TS, 1)))
+__attribute__((vec_type_hint(float4)))
+void linear_kernel_opt(
+    int M, int N, int K,
+    __global const float* A, 
+    __global const float* B_transposed, // [중요] (N, K) 형태
+    __global const float* bias,
+    __global float* C,
+    int weight_offset) 
+{
     const int local_col = get_local_id(0);
     const int local_row = get_local_id(1);
     const int group_col = get_group_id(0);
     const int group_row = get_group_id(1);
 
-    // Global Output Coordinate
-    const int col = (group_col * TS) + (local_col * 4);
-    const int row = (group_row * TS) + local_row;
+    const int row = group_row * TS + local_row; 
+    const int col = group_col * TS + local_col * 4;
 
-    // Local Memory
     __local float Asub[TS][TS + 1];
     __local float Bsub[TS][TS + 1];
 
     float4 acc = (float4)(0.0f);
 
-    // Loop over tiles
     const int numTiles = (K + TS - 1) / TS;
-    
-    const int local_idx = local_row * (TS/4) + local_col; // 0 .. 255
-    
+
+    // Loop over all tiles
     for (int t = 0; t < numTiles; t++) {
         const int tiledK = t * TS;
 
-        // 1. Load A [Row, K]
-        for(int i=0; i<4; i++) {
-             int tiled_k_idx = t*TS + local_col*4 + i;
-        }
-
-        // --- B 행렬 로딩 ---
+        // Load A
+        int global_a_row = row;
+        int global_a_col = tiledK + local_col * 4;
         
-        for (int i = 0; i < 4; i++) {
-            // 로드할 B 내부 좌표 (tr, tc)
-            int flat_idx = local_idx * 4 + i;
-            int tr = flat_idx / TS;
-            int tc = flat_idx % TS;
-            
-            int global_b_row = (group_col * TS) + tr + weight_offset;
-            int global_b_col = tiledK + tc;
-
-            float val = 0.0f;
-            if (global_b_row < (N + weight_offset) && global_b_col < K) {
-                val = B[global_b_row * K + global_b_col];
-            }
-            
-            Bsub[tc][tr] = val; 
+        float4 vecA = (float4)(0.0f);
+        if (global_a_row < M && global_a_col < K) {
+            vecA = *(__global const float4*)&A[global_a_row * K + global_a_col];
         }
-
-        // A 로딩
-        for (int i = 0; i < 4; i++) {
-            int flat_idx = local_idx * 4 + i;
-            int tr = flat_idx / TS;
-            int tc = flat_idx % TS;
-            
-            int global_a_row = (group_row * TS) + tr;
-            int global_a_col = tiledK + tc;
-            
-            float val = 0.0f;
-            if (global_a_row < M && global_a_col < K) {
-                val = A[global_a_row * K + global_a_col];
-            }
-            Asub[tr][tc] = val;
+        
+        Asub[local_row][local_col * 4 + 0] = vecA.x;
+        Asub[local_row][local_col * 4 + 1] = vecA.y;
+        Asub[local_row][local_col * 4 + 2] = vecA.z;
+        Asub[local_row][local_col * 4 + 3] = vecA.w;
+        
+        int global_b_row = col;
+        int global_b_col = tiledK + local_col * 4;
+        
+        int b_trans_row = group_col * TS + local_row; 
+        int b_trans_col = tiledK + local_col * 4;
+        
+        float4 vecB = (float4)(0.0f);
+        if (b_trans_row < (N + weight_offset) && b_trans_col < K) {
+             int real_row = b_trans_row + weight_offset; 
+             vecB = *(__global const float4*)&B_transposed[real_row * K + b_trans_col];
         }
-
+        
+        Bsub[local_col * 4 + 0][local_row] = vecB.x; // Transpose Store into Shared Mem
+        Bsub[local_col * 4 + 1][local_row] = vecB.y;
+        Bsub[local_col * 4 + 2][local_row] = vecB.z;
+        Bsub[local_col * 4 + 3][local_row] = vecB.w;
+        
         barrier(CLK_LOCAL_MEM_FENCE);
 
+        // 3. Calculation (Asub * Bsub)
+        // Asub: [Row][K], Bsub: [K][Col] (Shared mem 구조상)
+        
         for (int k = 0; k < TS; k++) {
-            float valA = Asub[local_row][k];
-            float4 valB;
+            float valA = Asub[local_row][k]; // Broadcast A
+            float4 valB; 
             valB.x = Bsub[k][local_col * 4 + 0];
             valB.y = Bsub[k][local_col * 4 + 1];
             valB.z = Bsub[k][local_col * 4 + 2];
@@ -568,18 +664,12 @@ void linear_kernel_opt(
         barrier(CLK_LOCAL_MEM_FENCE);
     }
 
-    // Store Result
+    // 4. Store Result
     if (row < M && col < N) {
-        // Bias Loading
         float4 b_val = (float4)(0.0f);
-        if (col + 3 < N) { // Boundary check safe logic required ideally
-             b_val.x = bias[col + 0 + weight_offset];
-             b_val.y = bias[col + 1 + weight_offset];
-             b_val.z = bias[col + 2 + weight_offset];
-             b_val.w = bias[col + 3 + weight_offset];
+        if (col + 3 < N) {
+             b_val = *(__global const float4*)&bias[col + weight_offset];
         }
-        
-        // Vector store
         __global float4* C_ptr = (__global float4*)&C[row * N + col];
         *C_ptr = acc + b_val;
     }
