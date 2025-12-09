@@ -20,17 +20,15 @@
 #define MAX_PROFILE_KERNELS 32
 #define TS 32
 
-// 프로파일링 실행 1, 아니면 0
+// Runtime tile size for benchmarking
+int g_tile_size = 32;
 #define ENABLE_PROFILING 1
 
-// --------------------------------------------------------
-// 자료구조 및 전역 변수
-// --------------------------------------------------------
 typedef struct {
     cl_context context;
-    cl_command_queue queues[2]; // Double Buffering을 위한 2개의 큐
+    cl_command_queue queues[2]; // Double Buffering
     cl_program program;
-    cl_kernel k_conv, k_flat, k_prep, k_ln, k_gemm, k_res, k_soft, k_gelu, k_lin, k_bias, k_score, k_mha_soft, k_context, k_cls_soft;
+    cl_kernel k_conv, k_flat, k_prep, k_ln, k_gemm, k_res, k_soft, k_gelu, k_lin, k_bias, k_score, k_mha_soft, k_context, k_cls_soft, k_qkv_fused;
     cl_device_id device;
 } OpenCL_Resources;
 
@@ -42,35 +40,34 @@ typedef struct {
     // Encoder
     cl_mem enc_in;           // [Batch, 197, 768]
     cl_mem enc_out;          // [Batch, 197, 768]
-    cl_mem ln_buf;           // LayerNorm 결과 저장용
-    cl_mem attn_res_buf;     // Attention 결과 저장용
-    cl_mem mlp_res_buf;      // MLP 결과 저장용
+    cl_mem ln_buf;
+    cl_mem attn_res_buf;
+    cl_mem mlp_res_buf;
 
     // MHA Internal
     cl_mem q_buf, k_buf, v_buf;
     cl_mem attn_score;       // [Batch, Heads, 197, 197]
-    cl_mem attn_out_linear;  // MHA 최종 Linear 전 결과
+    cl_mem attn_out_linear;
 
     // MLP Internal
     cl_mem mlp_fc1_out;      // [Batch, 197, 3072]
 
-    // Output Buffers (Pool에 포함시켜 관리)
     cl_mem logit_buf;        // [Batch, 197, 1000]
     cl_mem prob_buf;         // [Batch, 1000]
 } ViT_Memory_Pool;
 
 typedef struct {
-    char name[64];        // 커널 이름
-    double total_time_ms; // 누적 실행 시간
-    long call_count;      // 호출 횟수
+    char name[64];
+    double total_time_ms;
+    long call_count;
 } KernelProfile;
 
 KernelProfile g_profiler[MAX_PROFILE_KERNELS];
 int g_profile_count = 0;
 
 OpenCL_Resources g_opencl;
-ViT_Memory_Pool g_mem_pools[2]; // 2개의 메모리 풀
-cl_mem g_weight_buffers[152];   // 가중치는 Read-Only라 공유 가능
+ViT_Memory_Pool g_mem_pools[2];
+cl_mem g_weight_buffers[152];
 
 // --------------------------------------------------------
 // Utility Functions
@@ -124,7 +121,7 @@ void print_profiling_stats() {
 #if ENABLE_PROFILING
     printf("\n");
     printf("========================================================================\n");
-    printf("                  OPENCL KERNEL PROFILING RESULTS                        \n");
+    printf("                     OPENCL KERNEL PROFILING RESULTS                    \n");
     printf("========================================================================\n");
     printf(" %-20s | %8s | %15s | %12s \n", "Kernel Name", "Calls", "Total Time (ms)", "Avg Time (ms)");
     printf("------------------------------------------------------------------------\n");
@@ -150,14 +147,12 @@ void initialize_opencl() {
     g_opencl.context = clCreateContext(NULL, 1, &g_opencl.device, NULL, NULL, &err);
     CHECK_ERROR(err);
 
-    // 프로파일링 활성화 여부에 따른 Queue 속성
     cl_command_queue_properties props_val = 0;
 #if ENABLE_PROFILING
     props_val = CL_QUEUE_PROFILING_ENABLE;
 #endif
     cl_queue_properties props[] = { CL_QUEUE_PROPERTIES, props_val, 0 };
 
-    // Queue 2개 생성
     g_opencl.queues[0] = clCreateCommandQueueWithProperties(g_opencl.context, g_opencl.device, props, &err);
     CHECK_ERROR(err);
     g_opencl.queues[1] = clCreateCommandQueueWithProperties(g_opencl.context, g_opencl.device, props, &err);
@@ -166,11 +161,23 @@ void initialize_opencl() {
     size_t len;
     char *source = get_source_code("kernel.cl", &len);
     g_opencl.program = clCreateProgramWithSource(g_opencl.context, 1, (const char **)&source, &len, &err);
-    err = clBuildProgram(g_opencl.program, 1, &g_opencl.device, NULL, NULL, NULL);
+
+    char build_options[256];
+    sprintf(build_options, "-DTS=%d", g_tile_size);
+    printf("Building kernels with TS=%d\n", g_tile_size);
+    err = clBuildProgram(g_opencl.program, 1, &g_opencl.device, build_options, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        size_t log_size;
+        clGetProgramBuildInfo(g_opencl.program, g_opencl.device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        char *log = (char *)malloc(log_size);
+        clGetProgramBuildInfo(g_opencl.program, g_opencl.device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+        printf("Build Error:\n%s\n", log);
+        free(log);
+    }
     CHECK_ERROR(err);
     free(source);
 
-    // 커널 생성
+    // Kernel Creation
     g_opencl.k_conv = clCreateKernel(g_opencl.program, "Conv2d_Batched_Kernel", &err); CHECK_ERROR(err);
     g_opencl.k_flat = clCreateKernel(g_opencl.program, "FlattenTranspose_Batched_Kernel", &err); CHECK_ERROR(err);
     g_opencl.k_prep = clCreateKernel(g_opencl.program, "prepare_class_pos_kernel", &err); CHECK_ERROR(err);
@@ -181,13 +188,14 @@ void initialize_opencl() {
     g_opencl.k_gelu = clCreateKernel(g_opencl.program, "gelu_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_lin = clCreateKernel(g_opencl.program, "linear_kernel_opt", &err); CHECK_ERROR(err);
     g_opencl.k_bias = clCreateKernel(g_opencl.program, "add_bias_broadcast_kernel", &err); CHECK_ERROR(err);
-    g_opencl.k_score = clCreateKernel(g_opencl.program, "mha_score_kernel", &err); CHECK_ERROR(err);
+    g_opencl.k_score = clCreateKernel(g_opencl.program, "mha_score_kernel_3d", &err);
+    CHECK_ERROR(err);
     g_opencl.k_mha_soft = clCreateKernel(g_opencl.program, "mha_softmax_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_context = clCreateKernel(g_opencl.program, "mha_context_kernel", &err); CHECK_ERROR(err);
     g_opencl.k_cls_soft = clCreateKernel(g_opencl.program, "extract_cls_softmax_kernel", &err); CHECK_ERROR(err);
+    g_opencl.k_qkv_fused = clCreateKernel(g_opencl.program, "linear_qkv_fused_float4", &err); CHECK_ERROR(err);
 }
 
-// 인덱스를 받아 해당 풀을 초기화
 void init_memory_pool_idx(int pool_idx, int batch_size) {
     cl_int err;
     int tokens = ((img_size / patch_size) * (img_size / patch_size)) + 1; // 197
@@ -234,10 +242,8 @@ void load_all_weights(Network *networks) {
 }
 
 void release_resources() {
-    // 1. 가중치 해제
     for (int i = 0; i < 152; i++) clReleaseMemObject(g_weight_buffers[i]);
 
-    // 2. Memory Pools 해제 (2개 모두)
     for (int i = 0; i < 2; i++) {
         clReleaseMemObject(g_mem_pools[i].batch_input);
         clReleaseMemObject(g_mem_pools[i].layer0_out);
@@ -257,7 +263,6 @@ void release_resources() {
         clReleaseMemObject(g_mem_pools[i].prob_buf);
     }
 
-    // 3. 커널 및 프로그램 해제
     clReleaseKernel(g_opencl.k_conv); clReleaseKernel(g_opencl.k_flat);
     clReleaseKernel(g_opencl.k_prep); clReleaseKernel(g_opencl.k_ln);
     clReleaseKernel(g_opencl.k_gemm); clReleaseKernel(g_opencl.k_res);
@@ -265,9 +270,9 @@ void release_resources() {
     clReleaseKernel(g_opencl.k_lin); clReleaseKernel(g_opencl.k_bias);
     clReleaseKernel(g_opencl.k_score); clReleaseKernel(g_opencl.k_mha_soft);
     clReleaseKernel(g_opencl.k_context); clReleaseKernel(g_opencl.k_cls_soft);
+    clReleaseKernel(g_opencl.k_qkv_fused);
     clReleaseProgram(g_opencl.program);
 
-    // 4. Queue 및 Context 해제
     clReleaseCommandQueue(g_opencl.queues[0]);
     clReleaseCommandQueue(g_opencl.queues[1]);
     clReleaseContext(g_opencl.context);
@@ -366,11 +371,11 @@ void run_layernorm(cl_command_queue queue, cl_mem in, cl_mem out, int w_idx, int
 
 void run_linear(cl_command_queue queue, cl_mem in, cl_mem out, int w_idx, int b_idx, int tokens, int in_f, int out_f, int offset) {
     int WPT = 4;
-    size_t global_col = ((out_f + TS - 1) / TS) * (TS / WPT);
-    size_t global_row = ((tokens + TS - 1) / TS) * TS;
+    size_t global_col = ((out_f + g_tile_size - 1) / g_tile_size) * (g_tile_size / WPT);
+    size_t global_row = ((tokens + g_tile_size - 1) / g_tile_size) * g_tile_size;
 
     size_t global[2] = { global_col, global_row };
-    size_t local[2] = { TS / WPT, TS };
+    size_t local[2] = { g_tile_size / WPT, g_tile_size };
 
     clSetKernelArg(g_opencl.k_lin, 0, sizeof(int), &tokens);
     clSetKernelArg(g_opencl.k_lin, 1, sizeof(int), &out_f);
@@ -428,22 +433,41 @@ void MHA_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
     int total_tokens = tokens * batch_size;
     int head_dim = embed_dim / num_heads;
     float scale = 1.0f / sqrtf((float)head_dim);
+    int WPT = 4;
+    int ed = embed_dim;
+    size_t qkv_global_col = ((embed_dim + g_tile_size - 1) / g_tile_size) * (g_tile_size / WPT);
+    size_t qkv_global_row = ((total_tokens + g_tile_size - 1) / g_tile_size) * g_tile_size;
+    size_t qkv_global[2] = { qkv_global_col, qkv_global_row };
+    size_t qkv_local[2] = { g_tile_size / WPT, g_tile_size };
 
-    // Q, K, V 행렬 생성
-    run_linear(queue, in, pool->q_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 0);
-    run_linear(queue, in, pool->k_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, embed_dim);
-    run_linear(queue, in, pool->v_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 2 * embed_dim);
+    clSetKernelArg(g_opencl.k_qkv_fused, 0, sizeof(int), &total_tokens);
+    clSetKernelArg(g_opencl.k_qkv_fused, 1, sizeof(int), &ed);
+    clSetKernelArg(g_opencl.k_qkv_fused, 2, sizeof(int), &ed);
+    clSetKernelArg(g_opencl.k_qkv_fused, 3, sizeof(cl_mem), &in);
+    clSetKernelArg(g_opencl.k_qkv_fused, 4, sizeof(cl_mem), &g_weight_buffers[w_idx]);
+    clSetKernelArg(g_opencl.k_qkv_fused, 5, sizeof(cl_mem), &g_weight_buffers[b_idx]);
+    clSetKernelArg(g_opencl.k_qkv_fused, 6, sizeof(cl_mem), &pool->q_buf);
+    clSetKernelArg(g_opencl.k_qkv_fused, 7, sizeof(cl_mem), &pool->k_buf);
+    clSetKernelArg(g_opencl.k_qkv_fused, 8, sizeof(cl_mem), &pool->v_buf);
+
+#if ENABLE_PROFILING
+    cl_event e_qkv;
+    clEnqueueNDRangeKernel(queue, g_opencl.k_qkv_fused, 2, NULL, qkv_global, qkv_local, 0, NULL, &e_qkv);
+    register_kernel_time("QKV Fused", e_qkv);
+    clReleaseEvent(e_qkv);
+#else
+    clEnqueueNDRangeKernel(queue, g_opencl.k_qkv_fused, 2, NULL, qkv_global, qkv_local, 0, NULL, NULL);
+#endif
 
     size_t score_global[3] = {
-        (size_t)((tokens + TS - 1) / TS * TS),
-        (size_t)((tokens + TS - 1) / TS * TS),
+        (size_t)((tokens + g_tile_size - 1) / g_tile_size * g_tile_size),
+        (size_t)((tokens + g_tile_size - 1) / g_tile_size * g_tile_size),
         (size_t)(batch_size * num_heads)
     };
-    size_t score_local[3] = { TS, TS, 1 };
+    size_t score_local[3] = { g_tile_size, g_tile_size, 1 };
 
     int nh = num_heads;
 
-    // score = Q * K 행렬 곱 계산
     clSetKernelArg(g_opencl.k_score, 0, sizeof(cl_mem), &pool->q_buf);
     clSetKernelArg(g_opencl.k_score, 1, sizeof(cl_mem), &pool->k_buf);
     clSetKernelArg(g_opencl.k_score, 2, sizeof(cl_mem), &pool->attn_score);
@@ -472,13 +496,12 @@ void MHA_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
     clEnqueueNDRangeKernel(queue, g_opencl.k_mha_soft, 2, NULL, soft_global, NULL, 0, NULL, NULL);
 #endif
     size_t ctx_global[3] = {
-        (size_t)((head_dim + TS) / TS * TS),
-        (size_t)((tokens + TS) / TS * TS),
+        (size_t)((head_dim + g_tile_size) / g_tile_size * g_tile_size),
+        (size_t)((tokens + g_tile_size) / g_tile_size * g_tile_size),
         (size_t)(batch_size * num_heads)
     };
-    size_t ctx_local[3] = { TS, TS, 1 };
+    size_t ctx_local[3] = { g_tile_size, g_tile_size, 1 };
 
-    // attn * V 행렬 곱
     clSetKernelArg(g_opencl.k_context, 0, sizeof(cl_mem), &pool->attn_score);
     clSetKernelArg(g_opencl.k_context, 1, sizeof(cl_mem), &pool->v_buf);
     clSetKernelArg(g_opencl.k_context, 2, sizeof(cl_mem), &pool->attn_out_linear);
@@ -494,7 +517,6 @@ void MHA_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
     clEnqueueNDRangeKernel(queue, g_opencl.k_context, 3, NULL, ctx_global, ctx_local, 0, NULL, NULL);
 #endif
 
-    // 선형 변환
     run_linear(queue, pool->attn_out_linear, out, out_w_idx, out_b_idx, total_tokens, embed_dim, embed_dim, 0);
 }
 
@@ -528,14 +550,81 @@ void Encoder_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, c
 
 
 // --------------------------------------------------------
+// Benchmark Function - Test Multiple Tile Sizes
+// --------------------------------------------------------
+void benchmark_tile_sizes(ImageData *image, Network *networks) {
+    int test_sizes[] = { 8, 16, 32, 64 };
+    int num_tests = sizeof(test_sizes) / sizeof(int);
+
+    printf("\n");
+    printf("========================================================================\n");
+    printf("                     TILE SIZE BENCHMARK MODE                           \n");
+    printf("========================================================================\n");
+    printf("Testing TS values: ");
+    for (int i = 0; i < num_tests; i++) {
+        printf("%d%s", test_sizes[i], (i < num_tests - 1) ? ", " : "\n");
+    }
+    printf("------------------------------------------------------------------------\n\n");
+
+    double best_time = 1e30;
+    int best_ts = 0;
+
+    for (int i = 0; i < num_tests; i++) {
+        g_tile_size = test_sizes[i];
+        printf("\n");
+        printf("************************************************************************\n");
+        printf("** Testing TS = %2d                              **\n", g_tile_size);
+        printf("************************************************************************\n");
+
+        // Reset profiler
+        g_profile_count = 0;
+        memset(g_profiler, 0, sizeof(g_profiler));
+
+        // Initialize OpenCL with new TS
+        initialize_opencl();
+        init_memory_pool_idx(0, BATCH_SIZE_DEFAULT);
+        load_all_weights(networks);
+
+        // Run inference
+        float *probs;
+        ViT_opencl(image, networks, &probs);
+        free(probs);
+
+        // Get total kernel time
+        double total_time = 0.0;
+        for (int j = 0; j < g_profile_count; j++) {
+            total_time += g_profiler[j].total_time_ms;
+        }
+
+        // Print results
+        print_profiling_stats(); // Fixed function name
+
+        if (total_time < best_time) {
+            best_time = total_time;
+            best_ts = g_tile_size;
+        }
+
+        // Clean up for next test
+        release_resources();
+    }
+
+    printf("\n");
+    printf("========================================================================\n");
+    printf("                       BENCHMARK RESULTS SUMMARY                        \n");
+    printf("========================================================================\n");
+    printf("  FASTEST CONFIGURATION: TS = %d\n", best_ts);
+    printf("  TOTAL KERNEL TIME : %.4f sec\n", best_time / 1000.0);
+    printf("========================================================================\n\n");
+}
+
+
+// --------------------------------------------------------
 // Main Pipeline Function
 // --------------------------------------------------------
 void ViT_opencl(ImageData *image, Network *networks, float **probabilities) {
     int batch_size = BATCH_SIZE_DEFAULT;
 
     initialize_opencl();
-
-    // 2개의 Pool 초기화
     init_memory_pool_idx(0, batch_size);
     init_memory_pool_idx(1, batch_size);
 
@@ -647,144 +736,3 @@ void ViT_opencl(ImageData *image, Network *networks, float **probabilities) {
     print_profiling_stats();
     release_resources();
 }
-
-
-//void run_vit_batch_commands(cl_command_queue queue, ViT_Memory_Pool *pool, int batch_size) {
-//    if (batch_size <= 0) return;
-//
-//    // 1. Conv2d
-//    run_conv2d(queue, pool->batch_input, pool->layer0_out, 1, 2, batch_size);
-//
-//    // 2. Flatten
-//    run_flatten(queue, pool->layer0_out, pool->layer1_out, batch_size);
-//
-//    // 3. Prepare Input (Pos Emb)
-//    run_prepare_input(queue, pool->layer1_out, pool->enc_in, 0, 3, batch_size);
-//
-//    // 4. Encoder Loop (12 Layers)
-//    cl_mem in_buf = pool->enc_in;
-//    cl_mem out_buf = pool->enc_out;
-//
-//    for (int i = 0; i < 12; i++) {
-//        int base = 4 + i * 12;
-//        int indices[12];
-//        for (int k = 0; k < 12; k++) indices[k] = base + k;
-//
-//        Encoder_batched(queue, pool, in_buf, out_buf, indices, batch_size);
-//
-//        // Swap buffers
-//        cl_mem temp = in_buf; in_buf = out_buf; out_buf = temp;
-//    }
-//
-//    // 5. Head (LN + Linear)
-//    int tokens_total = ((img_size / patch_size) * (img_size / patch_size) + 1) * batch_size;
-//    run_layernorm(queue, in_buf, pool->enc_out, 148, 149, tokens_total);
-//    run_linear(queue, pool->enc_out, pool->logit_buf, 150, 151, tokens_total, embed_dim, num_classes, 0);
-//
-//    // 6. Softmax
-//    size_t soft_global = batch_size;
-//    int nc = num_classes;
-//    int seq_len = 197;
-//    clSetKernelArg(g_opencl.k_cls_soft, 0, sizeof(cl_mem), &pool->logit_buf);
-//    clSetKernelArg(g_opencl.k_cls_soft, 1, sizeof(cl_mem), &pool->prob_buf);
-//    clSetKernelArg(g_opencl.k_cls_soft, 2, sizeof(int), &nc);
-//    clSetKernelArg(g_opencl.k_cls_soft, 3, sizeof(int), &seq_len);
-//
-//    // 프로파일링용 이벤트
-//    clEnqueueNDRangeKernel(queue, g_opencl.k_cls_soft, 1, NULL, &soft_global, NULL, 0, NULL, NULL);
-//}
-//
-//void ViT_opencl(ImageData *image, Network *networks, float **probabilities) {
-//    int batch_size = BATCH_SIZE_DEFAULT;
-//
-//    // 초기화
-//    initialize_opencl();
-//    init_memory_pool_idx(0, batch_size);
-//    init_memory_pool_idx(1, batch_size);
-//    load_all_weights(networks);
-//
-//    int num_imgs = image[0].n;
-//
-//    // Host Buffers
-//    float *h_input[2];
-//    h_input[0] = (float *)malloc(sizeof(float) * batch_size * 3 * img_size * img_size);
-//    h_input[1] = (float *)malloc(sizeof(float) * batch_size * 3 * img_size * img_size);
-//
-//    float *h_probs[2];
-//    h_probs[0] = (float *)malloc(sizeof(float) * batch_size * num_classes);
-//    h_probs[1] = (float *)malloc(sizeof(float) * batch_size * num_classes);
-//
-//    printf("Starting Concurrent Execution Test (Batch Size: %d)\n", batch_size);
-//    printf("Processing 2 Batches simultaneously per loop...\n");
-//
-//    for (int start_idx = 0; start_idx < num_imgs; start_idx += (batch_size * 2)) {
-//
-//        int b0_start = start_idx;
-//        int b1_start = start_idx + batch_size;
-//
-//        int b0_count = (b0_start + batch_size <= num_imgs) ? batch_size : (num_imgs - b0_start);
-//        int b1_count = 0;
-//        if (b1_start < num_imgs) {
-//            b1_count = (b1_start + batch_size <= num_imgs) ? batch_size : (num_imgs - b1_start);
-//        }
-//
-//        // 1. Host Memory 복사 (데이터 준비)
-//        if (b0_count > 0) {
-//            for (int i = 0; i < b0_count; i++)
-//                memcpy(h_input[0] + i * 3 * img_size * img_size, image[b0_start + i].data, sizeof(float) * 3 * img_size * img_size);
-//        }
-//        if (b1_count > 0) {
-//            for (int i = 0; i < b1_count; i++)
-//                memcpy(h_input[1] + i * 3 * img_size * img_size, image[b1_start + i].data, sizeof(float) * 3 * img_size * img_size);
-//        }
-//        clock_t t_start = clock();
-//
-//        // 2. Queue 0에 명령 넣기 (Write -> Kernels -> Read)
-//        if (b0_count > 0) {
-//            clEnqueueWriteBuffer(g_opencl.queues[0], g_mem_pools[0].batch_input, CL_FALSE, 0,
-//                b0_count * 3 * img_size * img_size * sizeof(float), h_input[0], 0, NULL, NULL);
-//
-//            run_vit_batch_commands(g_opencl.queues[0], &g_mem_pools[0], b0_count);
-//
-//            clEnqueueReadBuffer(g_opencl.queues[0], g_mem_pools[0].prob_buf, CL_FALSE, 0,
-//                sizeof(float) * b0_count * num_classes, h_probs[0], 0, NULL, NULL);
-//        }
-//
-//        // 3. Queue 1에 명령 넣기
-//        if (b1_count > 0) {
-//            clEnqueueWriteBuffer(g_opencl.queues[1], g_mem_pools[1].batch_input, CL_FALSE, 0,
-//                b1_count * 3 * img_size * img_size * sizeof(float), h_input[1], 0, NULL, NULL);
-//
-//            run_vit_batch_commands(g_opencl.queues[1], &g_mem_pools[1], b1_count);
-//
-//            clEnqueueReadBuffer(g_opencl.queues[1], g_mem_pools[1].prob_buf, CL_FALSE, 0,
-//                sizeof(float) * b1_count * num_classes, h_probs[1], 0, NULL, NULL);
-//        }
-//
-//        // 4. 두 큐를 동시에 GPU로 발송
-//        if (b0_count > 0) clFlush(g_opencl.queues[0]);
-//        if (b1_count > 0) clFlush(g_opencl.queues[1]);
-//
-//        // 5. 동기화
-//        if (b0_count > 0) clFinish(g_opencl.queues[0]);
-//        if (b1_count > 0) clFinish(g_opencl.queues[1]);
-//
-//        clock_t t_end = clock();
-//        double loop_time = (double)(t_end - t_start) / CLOCKS_PER_SEC;
-//        printf("Dual Batch Processing (Img %d~%d): %.4f sec\n", start_idx, start_idx + b0_count + b1_count, loop_time);
-//        if (b0_count > 0) {
-//            for (int i = 0; i < b0_count; i++)
-//                memcpy(probabilities[b0_start + i], h_probs[0] + i * num_classes, sizeof(float) * num_classes);
-//        }
-//        if (b1_count > 0) {
-//            for (int i = 0; i < b1_count; i++)
-//                memcpy(probabilities[b1_start + i], h_probs[1] + i * num_classes, sizeof(float) * num_classes);
-//        }
-//    }
-//
-//    free(h_input[0]); free(h_input[1]);
-//    free(h_probs[0]); free(h_probs[1]);
-//
-//    print_profiling_stats();
-//    release_resources();
-//}
