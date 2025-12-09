@@ -2,8 +2,12 @@
 #define IN_CHANS 3
 #define EMBED_DIM 768
 #define IMG_SIZE 224
-#define OUT_SIZE (IMG_SIZE / PATCH_SIZE) 
+#define OUT_SIZE (IMG_SIZE / PATCH_SIZE)
+
+// Tile Size - can be overridden at compile time
+#ifndef TS
 #define TS 32
+#endif
 
 
 // 1. Bias Broadcast

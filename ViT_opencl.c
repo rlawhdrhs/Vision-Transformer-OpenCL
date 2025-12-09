@@ -20,6 +20,9 @@
 #define MAX_PROFILE_KERNELS 32
 #define TS 32
 
+// Runtime tile size for benchmarking
+int g_tile_size = 32;
+
 // �������ϸ� ���� 1, �ƴϸ� 0
 #define ENABLE_PROFILING 1
 
@@ -166,7 +169,12 @@ void initialize_opencl() {
     size_t len;
     char *source = get_source_code("kernel.cl", &len);
     g_opencl.program = clCreateProgramWithSource(g_opencl.context, 1, (const char **)&source, &len, &err);
-    err = clBuildProgram(g_opencl.program, 1, &g_opencl.device, NULL, NULL, NULL);
+
+    // Build with custom TS
+    char build_options[256];
+    sprintf(build_options, "-DTS=%d", g_tile_size);
+    printf("Building kernels with TS=%d\n", g_tile_size);
+    err = clBuildProgram(g_opencl.program, 1, &g_opencl.device, build_options, NULL, NULL);
     if (err != CL_SUCCESS) {
         size_t log_size;
         clGetProgramBuildInfo(g_opencl.program, g_opencl.device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
@@ -378,11 +386,11 @@ void run_layernorm(cl_command_queue queue, cl_mem in, cl_mem out, int w_idx, int
 
 void run_linear(cl_command_queue queue, cl_mem in, cl_mem out, int w_idx, int b_idx, int tokens, int in_f, int out_f, int offset) {
     int WPT = 4;
-    size_t global_col = ((out_f + TS - 1) / TS) * (TS / WPT);
-    size_t global_row = ((tokens + TS - 1) / TS) * TS;
+    size_t global_col = ((out_f + g_tile_size - 1) / g_tile_size) * (g_tile_size / WPT);
+    size_t global_row = ((tokens + g_tile_size - 1) / g_tile_size) * g_tile_size;
 
     size_t global[2] = { global_col, global_row };
-    size_t local[2] = { TS / WPT, TS };
+    size_t local[2] = { g_tile_size / WPT, g_tile_size };
 
     clSetKernelArg(g_opencl.k_lin, 0, sizeof(int), &tokens);
     clSetKernelArg(g_opencl.k_lin, 1, sizeof(int), &out_f);
@@ -447,11 +455,11 @@ void MHA_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
     run_linear(queue, in, pool->v_buf, w_idx, b_idx, total_tokens, embed_dim, embed_dim, 2 * embed_dim);
 
     size_t score_global[3] = {
-        (size_t)((tokens + TS - 1) / TS * TS),
-        (size_t)((tokens + TS - 1) / TS * TS),
+        (size_t)((tokens + g_tile_size - 1) / g_tile_size * g_tile_size),
+        (size_t)((tokens + g_tile_size - 1) / g_tile_size * g_tile_size),
         (size_t)(batch_size * num_heads)
     };
-    size_t score_local[3] = { TS, TS, 1 };
+    size_t score_local[3] = { g_tile_size, g_tile_size, 1 };
 
     int nh = num_heads;
 
@@ -484,11 +492,11 @@ void MHA_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, cl_me
     clEnqueueNDRangeKernel(queue, g_opencl.k_mha_soft, 2, NULL, soft_global, NULL, 0, NULL, NULL);
 #endif
     size_t ctx_global[3] = {
-        (size_t)((head_dim + TS) / TS * TS),
-        (size_t)((tokens + TS) / TS * TS),
+        (size_t)((head_dim + g_tile_size) / g_tile_size * g_tile_size),
+        (size_t)((tokens + g_tile_size) / g_tile_size * g_tile_size),
         (size_t)(batch_size * num_heads)
     };
-    size_t ctx_local[3] = { TS, TS, 1 };
+    size_t ctx_local[3] = { g_tile_size, g_tile_size, 1 };
 
     // attn * V ��� ��
     clSetKernelArg(g_opencl.k_context, 0, sizeof(cl_mem), &pool->attn_score);
@@ -536,6 +544,75 @@ void Encoder_batched(cl_command_queue queue, ViT_Memory_Pool *pool, cl_mem in, c
     // Copy for residual 2
     clEnqueueCopyBuffer(queue, in, out, 0, 0, total_elems * sizeof(float), 0, NULL, NULL);
     run_residual(queue, pool->mlp_res_buf, out, total_elems);
+}
+
+
+// --------------------------------------------------------
+// Benchmark Function - Test Multiple Tile Sizes
+// --------------------------------------------------------
+void benchmark_tile_sizes(ImageData *image, Network *networks) {
+    int test_sizes[] = {8, 16, 32, 64};
+    int num_tests = sizeof(test_sizes) / sizeof(int);
+
+    printf("\n");
+    printf("========================================================================\n");
+    printf("                    TILE SIZE BENCHMARK MODE                           \n");
+    printf("========================================================================\n");
+    printf("Testing TS values: ");
+    for (int i = 0; i < num_tests; i++) {
+        printf("%d%s", test_sizes[i], (i < num_tests - 1) ? ", " : "\n");
+    }
+    printf("------------------------------------------------------------------------\n\n");
+
+    double best_time = 1e30;
+    int best_ts = 0;
+
+    for (int i = 0; i < num_tests; i++) {
+        g_tile_size = test_sizes[i];
+        printf("\n");
+        printf("************************************************************************\n");
+        printf("**                     Testing TS = %2d                              **\n", g_tile_size);
+        printf("************************************************************************\n");
+
+        // Reset profiler
+        g_profile_count = 0;
+        memset(g_profiler, 0, sizeof(g_profiler));
+
+        // Initialize OpenCL with new TS
+        initialize_opencl();
+        init_memory_pool_idx(0, BATCH_SIZE_DEFAULT);
+        load_all_weights(networks);
+
+        // Run inference
+        float *probs;
+        ViT_opencl(image, networks, &probs);
+        free(probs);
+
+        // Get total kernel time
+        double total_time = 0.0;
+        for (int j = 0; j < g_profile_count; j++) {
+            total_time += g_profiler[j].total_time_ms;
+        }
+
+        // Print results
+        print_profiling_results();
+
+        if (total_time < best_time) {
+            best_time = total_time;
+            best_ts = g_tile_size;
+        }
+
+        // Clean up for next test
+        release_resources();
+    }
+
+    printf("\n");
+    printf("========================================================================\n");
+    printf("                      BENCHMARK RESULTS SUMMARY                        \n");
+    printf("========================================================================\n");
+    printf("  FASTEST CONFIGURATION: TS = %d\n", best_ts);
+    printf("  TOTAL KERNEL TIME: %.4f sec\n", best_time / 1000.0);
+    printf("========================================================================\n\n");
 }
 
 

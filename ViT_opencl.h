@@ -16,5 +16,10 @@
 #include <time.h>
 
 void ViT_opencl(ImageData *image, Network *networks, float **prb);
+void benchmark_tile_sizes(ImageData *image, Network *networks);
 char *get_source_code(const char *file_name, size_t * len);
-#endif#pragma once
+
+extern int g_tile_size;  // Runtime tile size variable
+
+#endif
+#pragma once
