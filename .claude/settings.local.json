@@ -6,7 +6,8 @@
       "Bash(mkdir:*)",
       "Bash(git ls-tree:*)",
       "Bash(git checkout:*)",
-      "Bash(\"C:/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/MSBuild.exe\" ViT.vcxproj -p:Configuration=Debug -p:Platform=x64)"
+      "Bash(\"C:/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/MSBuild.exe\" ViT.vcxproj -p:Configuration=Debug -p:Platform=x64)",
+      "Bash(git merge:*)"
     ],
     "deny": [],
     "ask": []
